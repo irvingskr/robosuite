@@ -19,14 +19,14 @@ class ArxGripper(GripperModel):
         # 将1个命令复制到2个关节（镜像运动）
         self.current_action = np.clip(
             self.current_action + np.array([1.0, 1.0]) * self.speed * np.sign(action), 
-            -10.0, 10.0
+            -1, 1
         )
         return self.current_action
 
     @property
     def init_qpos(self):
         # 两个手指的初始位置
-        return np.array([0.01, 0.01])
+        return np.array([0.03, 0.03])
 
     @property
     def speed(self):

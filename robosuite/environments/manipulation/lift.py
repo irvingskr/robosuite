@@ -150,7 +150,7 @@ class Lift(ManipulationEnv):
         gripper_types="default",
         base_types="NullBase",
         initialization_noise="default",
-        table_full_size=(0.8, 0.8, 0.05),
+        table_full_size=(1.2, 0.9, 0.05),
         table_friction=(1.0, 5e-3, 1e-4),
         use_camera_obs=True,
         use_object_obs=True,
@@ -278,7 +278,7 @@ class Lift(ManipulationEnv):
         """
         super()._load_model()
 
-        xpos = (-0.4, 0.0, 0.8)
+        xpos = (-0.6, -0.21, 0.8)
         
         self.robots[0].robot_model.set_base_xpos(xpos)
 
@@ -325,8 +325,8 @@ class Lift(ManipulationEnv):
             self.placement_initializer = UniformRandomSampler(
                 name="ObjectSampler",
                 mujoco_objects=self.cube,
-                x_range=[-0.3, 0],
-                y_range=[-0.2, 0.2],
+                x_range=[-0.5, -0.2],
+                y_range=[-0.41, 0.0],
                 rotation=(-np.pi, np.pi),  # Random rotation between -π and π (full range)
                 rotation_axis="z",  # Rotate around z-axis (vertical)
                 ensure_object_boundary_in_range=False,
