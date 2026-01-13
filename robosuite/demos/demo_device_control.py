@@ -105,7 +105,7 @@ if __name__ == "__main__":
         "--robots",
         nargs="+",
         type=str,
-        default="Panda",
+        default="Arx5",
         help="Which robot(s) to use in the env",
     )
     parser.add_argument(

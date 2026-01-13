@@ -563,10 +563,10 @@ if __name__ == "__main__":
         pass
 
     parser = argparse.ArgumentParser()
-    parser.add_argument("--headless", action="store_true", default=True, help="运行在无头模式")
+    parser.add_argument("--headless", action="store_true", default=False, help="运行在无头模式")
     parser.add_argument("--num_demos", type=int, default=200, help="需要收集的成功演示数量")
     # default_workers = max(1, os.cpu_count() - 2)
-    parser.add_argument("--workers", type=int, default=10, help="并行进程数量")
+    parser.add_argument("--workers", type=int, default=1, help="并行进程数量")
     
     args = parser.parse_args()
 
