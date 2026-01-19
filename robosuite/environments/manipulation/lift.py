@@ -231,9 +231,11 @@ class Lift(ManipulationEnv):
 
         Un-normalized summed components if using reward shaping:
 
-            - Reaching: in [0, 1], to encourage the arm to reach the cube
-            - Grasping: in {0, 0.25}, non-zero if arm is grasping the cube
-            - Lifting: in {0, 1}, non-zero if arm has lifted the cube
+            - Reaching (progress-based): encourages moving the gripper closer to the cube.
+              This is computed as a potential difference, so hovering near the cube yields ~0 reward.
+            - Grasping (event-based): a one-time bonus when the cube is first grasped.
+            - Lifting (progress-based): encourages increasing cube height *while grasped*.
+              Also computed as a potential difference to avoid reward hacking by holding position.
 
         The sparse reward only consists of the lifting component.
 
@@ -254,17 +256,57 @@ class Lift(ManipulationEnv):
 
         # use a shaping reward
         elif self.reward_shaping:
+            # Tunable (but kept internal to avoid changing the public API)
+            reaching_weight = 0.5
+            lifting_weight = 1.0
+            grasp_bonus = 0.25
 
-            # reaching reward
+            # Compute grasp state first since we will gate parts of the shaping reward on it
+            grasped = self._check_grasp(gripper=self.robots[0].gripper, object_geoms=self.cube)
+
+            # -----------------------
+            # Reaching (progress-only)
+            # -----------------------
             dist = self._gripper_to_target(
-                gripper=self.robots[0].gripper, target=self.cube.root_body, target_type="body", return_distance=True
+                gripper=self.robots[0].gripper,
+                target=self.cube.root_body,
+                target_type="body",
+                return_distance=True,
             )
-            reaching_reward = 1 - np.tanh(10.0 * dist)
-            reward += reaching_reward
+            # Potential in [0, 1], higher is better (closer)
+            reach_potential = 1.0 - np.tanh(10.0 * dist)
+            if getattr(self, "_prev_reach_potential", None) is None:
+                self._prev_reach_potential = reach_potential
+            reach_delta = reach_potential - self._prev_reach_potential
+            # Only encourage reaching before the cube is grasped (prevents double-counting after grasp)
+            if not grasped:
+                reward += reaching_weight * reach_delta
+            self._prev_reach_potential = reach_potential
 
-            # grasping reward
-            if self._check_grasp(gripper=self.robots[0].gripper, object_geoms=self.cube):
-                reward += 0.25
+            # -------------------------
+            # Grasping (one-time bonus)
+            # -------------------------
+            prev_grasped = bool(getattr(self, "_prev_grasped", False))
+            if grasped and (not prev_grasped):
+                reward += grasp_bonus
+            self._prev_grasped = grasped
+
+            # -----------------------
+            # Lifting (progress-only)
+            # -----------------------
+            cube_height = float(self.sim.data.body_xpos[self.cube_body_id][2])
+            table_height = float(self.model.mujoco_arena.table_offset[2])
+            height_above_table = cube_height - table_height
+            # Match the success criterion threshold so the potential saturates at "task success height"
+            lift_height_thresh = 0.03
+            lift_potential = np.clip(height_above_table / lift_height_thresh, 0.0, 1.0)
+            if getattr(self, "_prev_lift_potential", None) is None:
+                self._prev_lift_potential = lift_potential
+            lift_delta = lift_potential - self._prev_lift_potential
+            # Only encourage lifting if the cube is currently grasped
+            if grasped:
+                reward += lifting_weight * lift_delta
+            self._prev_lift_potential = lift_potential
 
         # Scale reward if requested
         if self.reward_scale is not None:
@@ -414,6 +456,11 @@ class Lift(ManipulationEnv):
             # Loop through all objects and reset their positions
             for obj_pos, obj_quat, obj in object_placements.values():
                 self.sim.data.set_joint_qpos(obj.joints[0], np.concatenate([np.array(obj_pos), np.array(obj_quat)]))
+
+        # Reset shaping reward state (used by progress-based rewards)
+        self._prev_reach_potential = None
+        self._prev_lift_potential = None
+        self._prev_grasped = False
 
     def visualize(self, vis_settings):
         """
