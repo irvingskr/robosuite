@@ -243,7 +243,9 @@ class Lift(ManipulationEnv):
         reward_scale / 2.25 as well so that the max score is equal to reward_scale
 
         Args:
-            action (np array): [NOT USED]
+            action (np array): Action taken at the current timestep. This may include arm control commands
+                and a gripper command (typically the last dimension). For most robosuite grippers, the
+                convention is: -1 => open, +1 => close.
 
         Returns:
             float: reward value
@@ -260,6 +262,13 @@ class Lift(ManipulationEnv):
             reaching_weight = 0.5
             lifting_weight = 1.0
             grasp_bonus = 0.25
+            # Penalize excessive / jittery motions to reduce fast, shaky behaviors
+            action_l2_weight = 2e-3
+            action_delta_l2_weight = 5e-3
+            # Penalize repeatedly closing the gripper without grasping (prevents ramming into the cube)
+            close_without_grasp_weight = 2e-2
+            close_threshold = 0.2
+            close_miss_streak_max = 25
 
             # Compute grasp state first since we will gate parts of the shaping reward on it
             grasped = self._check_grasp(gripper=self.robots[0].gripper, object_geoms=self.cube)
@@ -307,6 +316,58 @@ class Lift(ManipulationEnv):
             if grasped:
                 reward += lifting_weight * lift_delta
             self._prev_lift_potential = lift_potential
+
+            # --------------------------------------------
+            # Control regularization (smooth + slower moves)
+            # --------------------------------------------
+            if action is not None:
+                ac = np.asarray(action, dtype=np.float32).ravel()
+                # Infer gripper action dimension (usually 1). If unavailable, fall back to 1.
+                try:
+                    gripper_dim = int(getattr(self.robots[0].gripper, "dof", 1))
+                except Exception:
+                    gripper_dim = 1
+                gripper_dim = max(1, gripper_dim)
+
+                if ac.size >= gripper_dim:
+                    arm_ac = ac[:-gripper_dim] if ac.size > gripper_dim else np.zeros(0, dtype=np.float32)
+                    gripper_cmd = float(np.mean(ac[-gripper_dim:]))
+                else:
+                    arm_ac = ac
+                    gripper_cmd = 0.0
+
+                # Action magnitude penalty (encourages slower motion)
+                if arm_ac.size > 0:
+                    reward -= action_l2_weight * float(np.sum(np.square(arm_ac)))
+
+                # Action delta penalty (encourages smoothness / reduces jitter)
+                prev_ac = getattr(self, "_prev_action", None)
+                if prev_ac is not None:
+                    prev_ac = np.asarray(prev_ac, dtype=np.float32).ravel()
+                    # Only compare up to the common length to be robust to action spec differences
+                    n = min(prev_ac.size, ac.size)
+                    if n > 0:
+                        delta = ac[:n] - prev_ac[:n]
+                        reward -= action_delta_l2_weight * float(np.sum(np.square(delta)))
+                self._prev_action = ac
+
+                # -------------------------------------------------
+                # Gripper closing without grasp (with streak penalty)
+                # -------------------------------------------------
+                # Convention: -1 => open, +1 => close (see most gripper implementations)
+                closing_intent = max(0.0, gripper_cmd)
+                close_miss_streak = int(getattr(self, "_close_miss_streak", 0))
+
+                if (not grasped) and (closing_intent > close_threshold):
+                    close_miss_streak = min(close_miss_streak + 1, close_miss_streak_max)
+                else:
+                    close_miss_streak = 0
+                self._close_miss_streak = close_miss_streak
+
+                if (not grasped) and (closing_intent > close_threshold) and close_miss_streak > 0:
+                    # Allow short grasp attempts; penalize sustained closing more strongly
+                    streak_scale = float(close_miss_streak) / float(close_miss_streak_max)
+                    reward -= close_without_grasp_weight * closing_intent * streak_scale
 
         # Scale reward if requested
         if self.reward_scale is not None:
@@ -461,6 +522,9 @@ class Lift(ManipulationEnv):
         self._prev_reach_potential = None
         self._prev_lift_potential = None
         self._prev_grasped = False
+        # Reset action / gripper shaping state
+        self._prev_action = None
+        self._close_miss_streak = 0
 
     def visualize(self, vis_settings):
         """
