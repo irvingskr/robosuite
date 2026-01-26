@@ -30,7 +30,7 @@ class ArxGripper(GripperModel):
 
     @property
     def speed(self):
-        return 0.2
+        return 0.1
 
     @property
     def _important_geoms(self):
