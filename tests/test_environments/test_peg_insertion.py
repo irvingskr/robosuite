@@ -2,6 +2,7 @@ import numpy as np
 import pytest
 
 import robosuite as suite
+import robosuite.environments.manipulation.peg_insertion as peg_module
 from robosuite.models.objects import SquareHoleObject, SquarePegObject
 
 
@@ -112,3 +113,39 @@ def test_pre_action_forces_close_without_mutating_input(requested_gripper):
         assert np.all(env.robots[0].gripper["right"].current_action < 0.0)
     finally:
         env.close()
+
+
+def test_fixed_hole_position_is_restored(monkeypatch):
+    monkeypatch.setattr(peg_module, "RANDOMIZE_HOLE_POSITION", False)
+    env = _make_env()
+    try:
+        env.reset()
+        first = env.sim.data.body_xpos[env.hole_body_id].copy()
+        env.sim.model.body_pos[env.hole_body_id, :2] = [-0.2, 0.2]
+        env.reset()
+        second = env.sim.data.body_xpos[env.hole_body_id].copy()
+        assert np.allclose(first[:2], peg_module.FIXED_HOLE_XY)
+        assert np.allclose(second[:2], peg_module.FIXED_HOLE_XY)
+    finally:
+        env.close()
+
+
+def test_random_hole_position_is_seeded_and_in_range(monkeypatch):
+    monkeypatch.setattr(peg_module, "RANDOMIZE_HOLE_POSITION", True)
+    env1 = _make_env(seed=7)
+    env2 = _make_env(seed=7)
+    try:
+        sequence1 = []
+        sequence2 = []
+        for _ in range(3):
+            env1.reset()
+            env2.reset()
+            sequence1.append(env1.sim.data.body_xpos[env1.hole_body_id, :2].copy())
+            sequence2.append(env2.sim.data.body_xpos[env2.hole_body_id, :2].copy())
+        assert np.allclose(sequence1, sequence2)
+        assert all(peg_module.HOLE_X_RANGE[0] <= xy[0] <= peg_module.HOLE_X_RANGE[1] for xy in sequence1)
+        assert all(peg_module.HOLE_Y_RANGE[0] <= xy[1] <= peg_module.HOLE_Y_RANGE[1] for xy in sequence1)
+        assert not np.allclose(sequence1[0], sequence1[1])
+    finally:
+        env1.close()
+        env2.close()

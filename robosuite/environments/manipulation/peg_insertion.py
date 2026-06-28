@@ -169,11 +169,22 @@ class PegInsertion(ManipulationEnv):
         self.sim.data.qvel[start:end] = 0.0
         self.sim.forward()
 
+    def _reset_hole_position(self):
+        if RANDOMIZE_HOLE_POSITION:
+            xy = np.array(
+                [
+                    self.rng.uniform(*HOLE_X_RANGE),
+                    self.rng.uniform(*HOLE_Y_RANGE),
+                ]
+            )
+        else:
+            xy = FIXED_HOLE_XY
+        self.sim.model.body_pos[self.hole_body_id] = np.array([xy[0], xy[1], self.table_offset[2]])
+        self.sim.forward()
+
     def _reset_internal(self):
         super()._reset_internal()
-        self.sim.model.body_pos[self.hole_body_id] = np.array(
-            [FIXED_HOLE_XY[0], FIXED_HOLE_XY[1], self.table_offset[2]]
-        )
+        self._reset_hole_position()
         self._set_pregrasp_pose()
 
     def reward(self, action=None):
