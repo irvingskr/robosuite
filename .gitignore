@@ -116,6 +116,7 @@ MUJOCO_LOG.TXT
 .idea
 
 .pytest_cache/
+.worktrees/
 
 # private macros
 macros_private.py
