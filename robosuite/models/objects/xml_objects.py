@@ -170,6 +170,18 @@ class SquarePegObject(MujocoXMLObject):
         )
         return sites
 
+    @property
+    def bottom_offset(self):
+        return np.array([0.0, 0.0, -0.05])
+
+    @property
+    def top_offset(self):
+        return np.array([0.0, 0.0, 0.05])
+
+    @property
+    def horizontal_radius(self):
+        return 0.02
+
 
 class SquareHoleObject(MujocoXMLObject):
     """Fixed table-mounted square socket used by PegInsertion."""
@@ -194,6 +206,18 @@ class SquareHoleObject(MujocoXMLObject):
             }
         )
         return sites
+
+    @property
+    def bottom_offset(self):
+        return np.array([0.0, 0.0, 0.0])
+
+    @property
+    def top_offset(self):
+        return np.array([0.0, 0.0, 0.065])
+
+    @property
+    def horizontal_radius(self):
+        return 0.045
 
 
 class MilkVisualObject(MujocoXMLObject):

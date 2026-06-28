@@ -1,5 +1,7 @@
 import numpy as np
+import pytest
 
+import robosuite as suite
 from robosuite.models.objects import SquareHoleObject, SquarePegObject
 
 
@@ -12,6 +14,7 @@ def test_square_peg_object_contract():
 
     assert len(peg.joints) == 1
     assert set(peg.important_sites) >= {"center", "top", "bottom"}
+    assert set(peg.important_sites.values()) <= set(peg.sites)
     geoms = _collision_geoms(peg)
     assert len(geoms) == 1
     assert geoms[0].get("type") == "box"
@@ -23,7 +26,43 @@ def test_square_hole_object_contract():
 
     assert hole.joints == []
     assert set(hole.important_sites) >= {"mouth", "bottom", "axis"}
+    assert set(hole.important_sites.values()) <= set(hole.sites)
     geoms = _collision_geoms(hole)
     assert len(geoms) == 5
     assert np.allclose(hole.bottom_offset, [0.0, 0.0, 0.0])
     assert np.allclose(hole.top_offset, [0.0, 0.0, 0.065])
+
+
+def _make_env(**kwargs):
+    config = dict(
+        env_name="PegInsertion",
+        robots="Arx5",
+        gripper_types="ArxGripper",
+        has_renderer=False,
+        has_offscreen_renderer=False,
+        use_camera_obs=False,
+        use_object_obs=True,
+        hard_reset=False,
+    )
+    config.update(kwargs)
+    return suite.make(**config)
+
+
+def test_peg_insertion_is_registered_and_builds():
+    assert "PegInsertion" in suite.ALL_ENVIRONMENTS
+    env = _make_env()
+    try:
+        assert env.peg.root_body in env.sim.model.body_names
+        assert env.hole.root_body in env.sim.model.body_names
+    finally:
+        env.close()
+
+
+def test_peg_insertion_rejects_unsupported_robot():
+    with pytest.raises(AssertionError, match="only supports Arx5"):
+        _make_env(robots="Panda", gripper_types="ArxGripper")
+
+
+def test_peg_insertion_rejects_unsupported_gripper():
+    with pytest.raises(AssertionError, match="requires ArxGripper"):
+        _make_env(gripper_types=None)
