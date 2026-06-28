@@ -11,6 +11,8 @@ from .xml_objects import (
     CerealObject,
     SquareNutObject,
     RoundNutObject,
+    SquarePegObject,
+    SquareHoleObject,
     MilkVisualObject,
     BreadVisualObject,
     CerealVisualObject,

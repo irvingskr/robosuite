@@ -146,6 +146,56 @@ class RoundNutObject(MujocoXMLObject):
         return dic
 
 
+class SquarePegObject(MujocoXMLObject):
+    """Square peg used by the single-arm PegInsertion task."""
+
+    def __init__(self, name):
+        super().__init__(
+            xml_path_completion("objects/square-peg.xml"),
+            name=name,
+            joints=[dict(type="free", damping="0.0005")],
+            obj_type="all",
+            duplicate_collision_geoms=True,
+        )
+
+    @property
+    def important_sites(self):
+        sites = super().important_sites
+        sites.update(
+            {
+                "center": self.naming_prefix + "center_site",
+                "top": self.naming_prefix + "top_site",
+                "bottom": self.naming_prefix + "bottom_site",
+            }
+        )
+        return sites
+
+
+class SquareHoleObject(MujocoXMLObject):
+    """Fixed table-mounted square socket used by PegInsertion."""
+
+    def __init__(self, name):
+        super().__init__(
+            xml_path_completion("objects/square-hole.xml"),
+            name=name,
+            joints=None,
+            obj_type="all",
+            duplicate_collision_geoms=True,
+        )
+
+    @property
+    def important_sites(self):
+        sites = super().important_sites
+        sites.update(
+            {
+                "mouth": self.naming_prefix + "mouth_site",
+                "bottom": self.naming_prefix + "bottom_site",
+                "axis": self.naming_prefix + "axis_site",
+            }
+        )
+        return sites
+
+
 class MilkVisualObject(MujocoXMLObject):
     """
     Visual fiducial of milk carton (used in PickPlace).
