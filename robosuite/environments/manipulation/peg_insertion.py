@@ -187,9 +187,127 @@ class PegInsertion(ManipulationEnv):
         self._reset_hole_position()
         self._set_pregrasp_pose()
 
+    @staticmethod
+    def _square_yaw_error(peg_x, hole_x, hole_axis):
+        peg_x = peg_x - np.dot(peg_x, hole_axis) * hole_axis
+        hole_x = hole_x - np.dot(hole_x, hole_axis) * hole_axis
+        peg_x /= np.linalg.norm(peg_x)
+        hole_x /= np.linalg.norm(hole_x)
+        signed = np.arctan2(np.dot(np.cross(hole_x, peg_x), hole_axis), np.dot(hole_x, peg_x))
+        return abs((signed + np.pi / 4.0) % (np.pi / 2.0) - np.pi / 4.0)
+
+    def _compute_insertion_metrics(self):
+        peg_bottom = np.array(self.sim.data.site_xpos[self.peg_bottom_site_id])
+        hole_mouth = np.array(self.sim.data.site_xpos[self.hole_mouth_site_id])
+        peg_mat = np.array(self.sim.data.body_xmat[self.peg_body_id]).reshape(3, 3)
+        hole_mat = np.array(self.sim.data.body_xmat[self.hole_body_id]).reshape(3, 3)
+        peg_axis = peg_mat[:, 2] / np.linalg.norm(peg_mat[:, 2])
+        hole_axis = hole_mat[:, 2] / np.linalg.norm(hole_mat[:, 2])
+        displacement = peg_bottom - hole_mouth
+        insertion_depth = float(np.dot(hole_mouth - peg_bottom, hole_axis))
+        planar = displacement - np.dot(displacement, hole_axis) * hole_axis
+        xy_error = float(np.linalg.norm(planar))
+        vertical_angle = float(np.arccos(np.clip(np.dot(peg_axis, hole_axis), -1.0, 1.0)))
+        yaw_error = float(self._square_yaw_error(peg_mat[:, 0], hole_mat[:, 0], hole_axis))
+        return {
+            "peg_bottom": peg_bottom,
+            "hole_mouth": hole_mouth,
+            "insertion_depth": insertion_depth,
+            "xy_error": xy_error,
+            "vertical_angle": vertical_angle,
+            "yaw_error": yaw_error,
+        }
+
+    def staged_rewards(self):
+        metrics = self._compute_insertion_metrics()
+        distance = np.linalg.norm(metrics["peg_bottom"] - metrics["hole_mouth"])
+        approach = 0.25 * (1.0 - np.tanh(10.0 * distance))
+
+        alignment = 0.0
+        if distance <= 0.10:
+            xy_score = 1.0 - np.tanh(50.0 * metrics["xy_error"])
+            vertical_score = 1.0 - np.clip(metrics["vertical_angle"] / ALIGNMENT_ANGLE, 0.0, 1.0)
+            yaw_score = 1.0 - np.clip(metrics["yaw_error"] / ALIGNMENT_ANGLE, 0.0, 1.0)
+            alignment = 0.25 + 0.35 * np.mean([xy_score, vertical_score, yaw_score])
+
+        insertion = 0.0
+        if (
+            metrics["xy_error"] <= 0.010
+            and metrics["vertical_angle"] <= ALIGNMENT_ANGLE
+            and metrics["yaw_error"] <= ALIGNMENT_ANGLE
+        ):
+            depth_progress = np.clip(metrics["insertion_depth"] / SUCCESS_DEPTH, 0.0, 1.0)
+            insertion = 0.60 + 0.30 * depth_progress
+        return float(approach), float(alignment), float(insertion)
+
     def reward(self, action=None):
-        reward = float(self._check_success())
+        if self._check_success():
+            reward = 1.0
+        elif self.reward_shaping:
+            reward = max(self.staged_rewards())
+        else:
+            reward = 0.0
         return reward if self.reward_scale is None else reward * self.reward_scale
 
     def _check_success(self):
-        return False
+        metrics = self._compute_insertion_metrics()
+        return bool(
+            metrics["insertion_depth"] >= SUCCESS_DEPTH
+            and metrics["xy_error"] <= SUCCESS_XY_ERROR
+            and metrics["vertical_angle"] <= SUCCESS_ANGLE
+            and metrics["yaw_error"] <= SUCCESS_ANGLE
+        )
+
+    def _setup_observables(self):
+        observables = super()._setup_observables()
+        if not self.use_object_obs:
+            return observables
+        modality = "object"
+
+        @sensor(modality=modality)
+        def peg_pos(obs_cache):
+            return np.array(self.sim.data.body_xpos[self.peg_body_id])
+
+        @sensor(modality=modality)
+        def peg_quat(obs_cache):
+            return T.convert_quat(np.array(self.sim.data.body_xquat[self.peg_body_id]), to="xyzw")
+
+        @sensor(modality=modality)
+        def hole_pos(obs_cache):
+            return np.array(self.sim.data.site_xpos[self.hole_mouth_site_id])
+
+        @sensor(modality=modality)
+        def peg_to_hole_pos(obs_cache):
+            return hole_pos(obs_cache) - peg_pos(obs_cache)
+
+        @sensor(modality=modality)
+        def peg_bottom_to_hole_pos(obs_cache):
+            metrics = self._compute_insertion_metrics()
+            return metrics["hole_mouth"] - metrics["peg_bottom"]
+
+        def metric_sensor(name):
+            @sensor(modality=modality)
+            def metric(obs_cache):
+                return self._compute_insertion_metrics()[name]
+
+            metric.__name__ = name
+            return metric
+
+        sensors = [
+            peg_pos,
+            peg_quat,
+            hole_pos,
+            peg_to_hole_pos,
+            peg_bottom_to_hole_pos,
+            metric_sensor("insertion_depth"),
+            metric_sensor("xy_error"),
+            metric_sensor("vertical_angle"),
+            metric_sensor("yaw_error"),
+        ]
+        for observable_sensor in sensors:
+            observables[observable_sensor.__name__] = Observable(
+                name=observable_sensor.__name__,
+                sensor=observable_sensor,
+                sampling_rate=self.control_freq,
+            )
+        return observables

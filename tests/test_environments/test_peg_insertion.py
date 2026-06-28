@@ -3,6 +3,8 @@ import pytest
 
 import robosuite as suite
 import robosuite.environments.manipulation.peg_insertion as peg_module
+import robosuite.utils.transform_utils as T
+from robosuite.environments.manipulation.peg_insertion import PEG_HALF_LENGTH
 from robosuite.models.objects import SquareHoleObject, SquarePegObject
 
 
@@ -149,3 +151,80 @@ def test_random_hole_position_is_seeded_and_in_range(monkeypatch):
     finally:
         env1.close()
         env2.close()
+
+
+def _set_peg_pose(env, depth=0.04, xy_error=0.0, roll=0.0, yaw=0.0):
+    quat_xyzw = T.mat2quat(T.euler2mat(np.array([roll, 0.0, yaw])))
+    peg_axis = T.quat2mat(quat_xyzw) @ np.array([0.0, 0.0, 1.0])
+    mouth = env.sim.data.site_xpos[env.hole_mouth_site_id].copy()
+    bottom = mouth + np.array([xy_error, 0.0, -depth])
+    center = bottom + PEG_HALF_LENGTH * peg_axis
+    env.sim.data.set_joint_qpos(
+        env.peg_joint,
+        np.concatenate([center, T.convert_quat(quat_xyzw, to="wxyz")]),
+    )
+    env.sim.forward()
+
+
+@pytest.mark.parametrize(
+    "pose, expected",
+    [
+        ({}, True),
+        ({"depth": 0.039}, False),
+        ({"xy_error": 0.004}, False),
+        ({"roll": np.deg2rad(6.0)}, False),
+        ({"yaw": np.deg2rad(6.0)}, False),
+        ({"yaw": np.deg2rad(90.0)}, True),
+    ],
+)
+def test_success_boundaries(pose, expected):
+    env = _make_env()
+    try:
+        env.reset()
+        _set_peg_pose(env, **pose)
+        assert env._check_success() is expected
+    finally:
+        env.close()
+
+
+def test_sparse_and_dense_rewards_are_scaled_and_bounded():
+    sparse = _make_env(reward_shaping=False, reward_scale=2.0)
+    dense = _make_env(reward_shaping=True, reward_scale=2.0)
+    try:
+        sparse.reset()
+        dense.reset()
+        _set_peg_pose(sparse, depth=0.04)
+        _set_peg_pose(dense, depth=0.04)
+        assert sparse.reward() == pytest.approx(2.0)
+        assert dense.reward() == pytest.approx(2.0)
+
+        _set_peg_pose(sparse, depth=0.02)
+        _set_peg_pose(dense, depth=0.02)
+        assert sparse.reward() == 0.0
+        assert 0.0 < dense.reward() < 2.0
+    finally:
+        sparse.close()
+        dense.close()
+
+
+def test_object_observations_have_expected_names_and_shapes():
+    env = _make_env()
+    try:
+        obs = env.reset()
+        expected = {
+            "peg_pos": (3,),
+            "peg_quat": (4,),
+            "hole_pos": (3,),
+            "peg_to_hole_pos": (3,),
+            "peg_bottom_to_hole_pos": (3,),
+            "insertion_depth": (),
+            "xy_error": (),
+            "vertical_angle": (),
+            "yaw_error": (),
+        }
+        for name, shape in expected.items():
+            assert name in obs
+            assert np.asarray(obs[name]).shape == shape
+        assert "object-state" in obs
+    finally:
+        env.close()
