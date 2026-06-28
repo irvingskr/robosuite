@@ -137,13 +137,44 @@ class PegInsertion(ManipulationEnv):
         self.right_finger_geom_id = self.sim.model.geom_name2id(gripper.important_geoms["right_fingerpad"][0])
         self.left_finger_geom_id = self.sim.model.geom_name2id(gripper.important_geoms["left_fingerpad"][1])
 
+    def _pre_action(self, action, policy_step=False):
+        forced_action = np.array(action, dtype=float, copy=True)
+        forced_action[-1] = -1.0
+        super()._pre_action(forced_action, policy_step=policy_step)
+
+    def _set_pregrasp_pose(self):
+        robot = self.robots[0]
+        robot.set_gripper_joint_positions(
+            np.full(2, PREGRASP_GRIPPER_QPOS, dtype=float),
+            gripper_arm="right",
+        )
+        self.sim.forward()
+
+        right_pos = np.array(self.sim.data.geom_xpos[self.right_finger_geom_id])
+        left_pos = np.array(self.sim.data.geom_xpos[self.left_finger_geom_id])
+        pad_midpoint = 0.5 * (right_pos + left_pos)
+        pad_mat = np.array(self.sim.data.geom_xmat[self.right_finger_geom_id]).reshape(3, 3)
+        pad_x_xy = pad_mat[:2, 0]
+        yaw = np.arctan2(pad_x_xy[1], pad_x_xy[0])
+        peg_quat_xyzw = T.mat2quat(T.euler2mat(np.array([0.0, 0.0, yaw])))
+        peg_quat_wxyz = T.convert_quat(peg_quat_xyzw, to="wxyz")
+        peg_center = pad_midpoint.copy()
+        peg_center[2] -= PEG_HALF_LENGTH - PEG_GRASP_OVERLAP / 2.0
+
+        self.sim.data.set_joint_qpos(
+            self.peg_joint,
+            np.concatenate([peg_center, peg_quat_wxyz]),
+        )
+        start, end = self.peg_qvel_addr
+        self.sim.data.qvel[start:end] = 0.0
+        self.sim.forward()
+
     def _reset_internal(self):
         super()._reset_internal()
         self.sim.model.body_pos[self.hole_body_id] = np.array(
             [FIXED_HOLE_XY[0], FIXED_HOLE_XY[1], self.table_offset[2]]
         )
-        self.sim.data.set_joint_qpos(self.peg_joint, np.array([0.0, 0.0, 1.0, 1.0, 0.0, 0.0, 0.0]))
-        self.sim.forward()
+        self._set_pregrasp_pose()
 
     def reward(self, action=None):
         reward = float(self._check_success())

@@ -66,3 +66,49 @@ def test_peg_insertion_rejects_unsupported_robot():
 def test_peg_insertion_rejects_unsupported_gripper():
     with pytest.raises(AssertionError, match="requires ArxGripper"):
         _make_env(gripper_types=None)
+
+
+def _peg_contacts(env):
+    peg_geoms = {env.sim.model.geom_name2id(name) for name in env.peg.contact_geoms}
+    pairs = {
+        frozenset((env.sim.data.contact[i].geom1, env.sim.data.contact[i].geom2))
+        for i in range(env.sim.data.ncon)
+    }
+    return {
+        "left": any(frozenset((env.left_finger_geom_id, peg_geom)) in pairs for peg_geom in peg_geoms),
+        "right": any(frozenset((env.right_finger_geom_id, peg_geom)) in pairs for peg_geom in peg_geoms),
+    }
+
+
+def test_reset_places_peg_between_fingers_and_grasps_it():
+    env = _make_env()
+    try:
+        env.reset()
+        pad_midpoint = 0.5 * (
+            env.sim.data.geom_xpos[env.left_finger_geom_id]
+            + env.sim.data.geom_xpos[env.right_finger_geom_id]
+        )
+        peg_center = env.sim.data.site_xpos[env.peg_center_site_id]
+        assert np.linalg.norm(peg_center[:2] - pad_midpoint[:2]) < 0.005
+        assert peg_center[2] < pad_midpoint[2]
+
+        action = np.zeros(env.action_dim)
+        env.step(action)
+        assert _peg_contacts(env) == {"left": True, "right": True}
+    finally:
+        env.close()
+
+
+@pytest.mark.parametrize("requested_gripper", [-1.0, 0.0, 1.0])
+def test_pre_action_forces_close_without_mutating_input(requested_gripper):
+    env = _make_env()
+    try:
+        env.reset()
+        action = np.zeros(env.action_dim)
+        action[-1] = requested_gripper
+        original = action.copy()
+        env._pre_action(action, policy_step=True)
+        assert np.array_equal(action, original)
+        assert np.all(env.robots[0].gripper["right"].current_action < 0.0)
+    finally:
+        env.close()
