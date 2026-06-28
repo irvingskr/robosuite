@@ -32,7 +32,8 @@ def test_environment_determinism():
         seed = np.random.randint(0, 10000)
         # Create config dict
         env_config = {"env_name": env_name}
-        for robot_name in ("Panda", "Sawyer", "Baxter", "GR1"):
+        robot_names = ("Arx5",) if env_name == "PegInsertion" else ("Panda", "Sawyer", "Baxter", "GR1")
+        for robot_name in robot_names:
             # create an environment for learning on pixels
             config = None
             if "TwoArm" in env_name:

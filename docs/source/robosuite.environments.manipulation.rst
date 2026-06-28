@@ -36,6 +36,14 @@ robosuite.environments.manipulation.nut\_assembly module
    :undoc-members:
    :show-inheritance:
 
+robosuite.environments.manipulation.peg\_insertion module
+--------------------------------------------------------
+
+.. automodule:: robosuite.environments.manipulation.peg_insertion
+   :members:
+   :undoc-members:
+   :show-inheritance:
+
 robosuite.environments.manipulation.pick\_place module
 ------------------------------------------------------
 

@@ -228,3 +228,17 @@ def test_object_observations_have_expected_names_and_shapes():
         assert "object-state" in obs
     finally:
         env.close()
+
+
+def test_peg_insertion_zero_action_smoke():
+    env = _make_env()
+    try:
+        obs = env.reset()
+        for _ in range(10):
+            obs, reward, done, info = env.step(np.zeros(env.action_dim))
+            assert np.isfinite(reward)
+            assert all(np.all(np.isfinite(value)) for value in obs.values())
+            assert isinstance(done, (bool, np.bool_))
+            assert isinstance(info, dict)
+    finally:
+        env.close()
