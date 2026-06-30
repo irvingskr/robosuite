@@ -186,6 +186,7 @@ class PegInsertion(ManipulationEnv):
         super()._reset_internal()
         self._reset_hole_position()
         self._set_pregrasp_pose()
+        self._prev_reward_potential = None
 
     @staticmethod
     def _square_yaw_error(peg_x, hole_x, hole_axis):
@@ -240,11 +241,18 @@ class PegInsertion(ManipulationEnv):
             insertion = 0.60 + 0.30 * depth_progress
         return float(approach), float(alignment), float(insertion)
 
+    def _reward_potential(self):
+        return max(self.staged_rewards())
+
     def reward(self, action=None):
         if self._check_success():
             reward = 1.0
         elif self.reward_shaping:
-            reward = max(self.staged_rewards())
+            potential = self._reward_potential()
+            if getattr(self, "_prev_reward_potential", None) is None:
+                self._prev_reward_potential = potential
+            reward = potential - self._prev_reward_potential
+            self._prev_reward_potential = potential
         else:
             reward = 0.0
         return reward if self.reward_scale is None else reward * self.reward_scale

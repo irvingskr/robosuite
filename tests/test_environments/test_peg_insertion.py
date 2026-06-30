@@ -187,7 +187,7 @@ def test_success_boundaries(pose, expected):
         env.close()
 
 
-def test_sparse_and_dense_rewards_are_scaled_and_bounded():
+def test_sparse_and_dense_rewards_are_scaled_and_delta_based():
     sparse = _make_env(reward_shaping=False, reward_scale=2.0)
     dense = _make_env(reward_shaping=True, reward_scale=2.0)
     try:
@@ -201,7 +201,14 @@ def test_sparse_and_dense_rewards_are_scaled_and_bounded():
         _set_peg_pose(sparse, depth=0.02)
         _set_peg_pose(dense, depth=0.02)
         assert sparse.reward() == 0.0
-        assert 0.0 < dense.reward() < 2.0
+        assert dense.reward() == 0.0
+
+        _set_peg_pose(dense, depth=0.03)
+        assert dense.reward() > 0.0
+        assert dense.reward() == 0.0
+
+        _set_peg_pose(dense, depth=0.01)
+        assert dense.reward() < 0.0
     finally:
         sparse.close()
         dense.close()
