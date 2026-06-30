@@ -200,18 +200,68 @@ def test_sparse_and_dense_rewards_are_scaled_and_delta_based():
 
         _set_peg_pose(sparse, depth=0.02)
         _set_peg_pose(dense, depth=0.02)
+        action = np.zeros(dense.action_dim)
         assert sparse.reward() == 0.0
-        assert dense.reward() == 0.0
+        reward, _, _ = dense._post_action(action)
+        assert reward == 0.0
 
         _set_peg_pose(dense, depth=0.03)
         assert dense.reward() > 0.0
-        assert dense.reward() == 0.0
+        assert dense.reward() > 0.0
+        reward, _, _ = dense._post_action(action)
+        assert reward > 0.0
+        reward, _, _ = dense._post_action(action)
+        assert reward == 0.0
 
         _set_peg_pose(dense, depth=0.01)
-        assert dense.reward() < 0.0
+        reward, _, _ = dense._post_action(action)
+        assert reward < 0.0
     finally:
         sparse.close()
         dense.close()
+
+
+def test_insertion_potential_rewards_depth_when_aligned():
+    env = _make_env(reward_shaping=True)
+    try:
+        env.reset()
+        _set_peg_pose(env, depth=0.005, xy_error=0.0)
+        shallow = env._reward_potential()
+        _set_peg_pose(env, depth=0.025, xy_error=0.0)
+        deeper = env._reward_potential()
+        assert deeper > shallow
+    finally:
+        env.close()
+
+
+def test_insertion_potential_penalizes_depth_when_misaligned():
+    env = _make_env(reward_shaping=True)
+    try:
+        env.reset()
+        _set_peg_pose(env, depth=0.005, xy_error=0.02)
+        shallow = env._reward_potential()
+        _set_peg_pose(env, depth=0.025, xy_error=0.02)
+        deeper = env._reward_potential()
+        assert deeper < shallow
+    finally:
+        env.close()
+
+
+def test_staged_insertion_reward_uses_soft_alignment_gate():
+    env = _make_env(reward_shaping=True)
+    try:
+        env.reset()
+        _set_peg_pose(env, depth=0.005, xy_error=0.012)
+        _, shallow_alignment, shallow_insertion = env.staged_rewards()
+        _set_peg_pose(env, depth=0.025, xy_error=0.012)
+        _, deeper_alignment, deeper_insertion = env.staged_rewards()
+
+        assert shallow_insertion > 0.0
+        assert shallow_insertion >= shallow_alignment
+        assert deeper_insertion > deeper_alignment
+        assert deeper_insertion > shallow_insertion
+    finally:
+        env.close()
 
 
 def test_object_observations_have_expected_names_and_shapes():

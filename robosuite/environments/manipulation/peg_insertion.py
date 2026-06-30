@@ -231,31 +231,53 @@ class PegInsertion(ManipulationEnv):
             yaw_score = 1.0 - np.clip(metrics["yaw_error"] / ALIGNMENT_ANGLE, 0.0, 1.0)
             alignment = 0.25 + 0.35 * np.mean([xy_score, vertical_score, yaw_score])
 
-        insertion = 0.0
-        if (
-            metrics["xy_error"] <= 0.010
-            and metrics["vertical_angle"] <= ALIGNMENT_ANGLE
-            and metrics["yaw_error"] <= ALIGNMENT_ANGLE
-        ):
-            depth_progress = np.clip(metrics["insertion_depth"] / SUCCESS_DEPTH, 0.0, 1.0)
-            insertion = 0.60 + 0.30 * depth_progress
+        xy_score = 1.0 - np.tanh(50.0 * metrics["xy_error"])
+        vertical_score = 1.0 - np.clip(metrics["vertical_angle"] / ALIGNMENT_ANGLE, 0.0, 1.0)
+        yaw_score = 1.0 - np.clip(metrics["yaw_error"] / ALIGNMENT_ANGLE, 0.0, 1.0)
+        soft_alignment = xy_score * np.mean([vertical_score, yaw_score])
+        depth_progress = np.clip(metrics["insertion_depth"] / SUCCESS_DEPTH, 0.0, 1.0)
+        insertion = alignment + 0.30 * soft_alignment * depth_progress
         return float(approach), float(alignment), float(insertion)
 
     def _reward_potential(self):
-        return max(self.staged_rewards())
+        metrics = self._compute_insertion_metrics()
+        approach_gap = max(-metrics["insertion_depth"], 0.0)
+        approach_distance = np.linalg.norm([metrics["xy_error"], approach_gap])
+        approach_score = 1.0 - np.tanh(10.0 * approach_distance)
+        xy_score = 1.0 - np.tanh(50.0 * metrics["xy_error"])
+        vertical_score = 1.0 - np.clip(metrics["vertical_angle"] / ALIGNMENT_ANGLE, 0.0, 1.0)
+        yaw_score = 1.0 - np.clip(metrics["yaw_error"] / ALIGNMENT_ANGLE, 0.0, 1.0)
+        alignment_score = xy_score * np.mean([vertical_score, yaw_score])
+        depth_progress = np.clip(metrics["insertion_depth"] / SUCCESS_DEPTH, 0.0, 1.0)
+        gated_alignment = alignment_score**2
+        bad_insert = depth_progress * (1.0 - alignment_score)
+        return float(
+            0.20 * approach_score
+            + 0.25 * alignment_score
+            + 0.55 * gated_alignment * depth_progress
+            - 0.25 * bad_insert
+        )
 
-    def reward(self, action=None):
+    def _compute_reward(self, action=None, update_reward_state=False):
         if self._check_success():
             reward = 1.0
         elif self.reward_shaping:
             potential = self._reward_potential()
-            if getattr(self, "_prev_reward_potential", None) is None:
+            prev_potential = getattr(self, "_prev_reward_potential", None)
+            reward = 0.0 if prev_potential is None else potential - prev_potential
+            if update_reward_state:
                 self._prev_reward_potential = potential
-            reward = potential - self._prev_reward_potential
-            self._prev_reward_potential = potential
         else:
             reward = 0.0
         return reward if self.reward_scale is None else reward * self.reward_scale
+
+    def reward(self, action=None):
+        return self._compute_reward(action=action, update_reward_state=False)
+
+    def _post_action(self, action):
+        reward = self._compute_reward(action=action, update_reward_state=True)
+        self.done = (self.timestep >= self.horizon) and not self.ignore_done
+        return reward, self.done, {}
 
     def _check_success(self):
         metrics = self._compute_insertion_metrics()

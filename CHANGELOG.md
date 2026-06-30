@@ -6,12 +6,14 @@
 - Added fixed or seeded-random socket placement selected through a module-level code constant.
 - Added staged insertion rewards and geometric object-state observations.
 - Changed `PegInsertion` dense reward shaping to use progress deltas from a total staged potential.
+- Penalized misaligned insertion depth in `PegInsertion` dense reward to discourage pushing into the socket before alignment.
 
 ### Design Rationale
 - Kept the environment independent from `NutAssembly` because nut selection and two-peg behavior do not apply.
 - Initialized the peg as a free body between the ARX fingers so grasp stability comes from MuJoCo contact rather than a weld constraint.
 - Preserved the standard seven-dimensional ARX action interface while forcing the gripper component closed for compatibility with existing scripts and datasets.
 - Used potential deltas for dense insertion reward so static poses no longer keep producing shaping reward.
+- Sharpened the depth reward with an alignment-squared gate and negative feedback for depth progress while poorly aligned.
 
 ### Notes & Caveats
 - The environment supports only `Arx5` with `ArxGripper`.
