@@ -8,6 +8,7 @@
 - Changed `PegInsertion` dense reward shaping to use progress deltas from a total staged potential.
 - Penalized misaligned insertion depth in `PegInsertion` dense reward to discourage pushing into the socket before alignment.
 - Changed `Stack` dense reward shaping to add discounted PBRS progress, `0.99 * Phi(s') - Phi(s)`, to the sparse task reward.
+- Reworked Stack lifting, horizontal alignment, and downward placement into continuous geometric potential stages.
 - Moved the default `Stack` object sampling region forward and enabled a narrower seeded-random `PegInsertion` hole region.
 
 ### Design Rationale
@@ -16,7 +17,8 @@
 - Preserved the standard seven-dimensional ARX action interface while forcing the gripper component closed for compatibility with existing scripts and datasets.
 - Used potential deltas for dense insertion reward so static poses no longer keep producing shaping reward.
 - Sharpened the depth reward with an alignment-squared gate and negative feedback for depth progress while poorly aligned.
-- Reused the existing maximum staged Stack score as the potential so reward semantics remain stable while repeated static-state rewards are removed.
+- Used the zero-based maximum staged Stack score as the potential so no-progress random rollouts do not accumulate a constant positive return; stationary progressed states retain the expected `gamma < 1` discount cost.
+- Scaled lift height over 15 cm, sharpened horizontal alignment distance, and added placement descent progress so successful demonstrations receive mostly positive dense rewards without adding a constant baseline.
 - Cached the initial Stack potential after MuJoCo pose propagation so the first transition receives the correct PBRS term.
 
 ### Notes & Caveats

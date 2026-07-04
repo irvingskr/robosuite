@@ -2,9 +2,9 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Convert Stack dense reward shaping from repeated absolute phase scores to `r_sparse + 0.99 * Phi(s') - Phi(s)` while preserving sparse reward scaling and existing staged rewards.
+**Goal:** Convert Stack dense reward shaping to `r_sparse + 0.99 * Phi(s') - Phi(s)` and provide continuous lift, alignment, and placement progress without rewarding no-progress random rollouts.
 
-**Architecture:** Keep `staged_rewards()` as the single definition of Stack progress and define `Phi` as its maximum component. Mirror PegInsertion's read-only `_compute_reward()` / state-updating `_post_action()` split, then seed the previous potential from the fully forwarded reset state.
+**Architecture:** Keep `staged_rewards()` as the single definition of Stack progress and define `Phi` as its zero-based maximum component. Replace the binary lift / weak alignment score with continuous lift-height, horizontal-alignment, and downward-placement geometry. Mirror PegInsertion's read-only `_compute_reward()` / state-updating `_post_action()` split and do not shift the potential by a constant.
 
 **Tech Stack:** Python, NumPy, robosuite / MuJoCo, pytest
 
@@ -48,6 +48,15 @@ def test_shaped_reward_adds_sparse_reward_and_discounted_potential_difference():
     assert env._prev_reward_potential == 0.4
 
 
+def test_reward_potential_is_zero_without_progress_and_positive_at_success():
+    env = _reward_only_stack(stages=(0.0, 0.0, 0.0), previous=0.0)
+
+    assert env._reward_potential() == 0.0
+
+    env.staged_rewards = lambda: (0.2, 0.7, 2.0)
+    assert env._reward_potential() == pytest.approx(2.0)
+
+
 def test_sparse_reward_and_existing_scaling_are_preserved_without_shaping():
     env = _reward_only_stack(
         stages=(0.2, 0.7, 2.0),
@@ -69,11 +78,22 @@ def test_post_action_updates_potential_once_and_stalling_has_discount_cost():
 
     assert first_reward == pytest.approx(0.99 * 0.7 - 0.4)
     assert second_reward == pytest.approx(0.99 * 0.7 - 0.7)
-    assert env._prev_reward_potential == 0.7
+    assert first_reward > 0.0
+    assert second_reward < 0.0
+    assert env._prev_reward_potential == pytest.approx(0.7)
     assert first_done is False
     assert second_done is False
     assert first_info == {}
     assert second_info == {}
+
+
+def test_no_progress_rollout_does_not_accumulate_positive_shaping_return():
+    env = _reward_only_stack(stages=(0.0, 0.0, 0.0), previous=None)
+    env._prev_reward_potential = env._reward_potential()
+
+    episode_return = sum(env._post_action(action=None)[0] for _ in range(201))
+
+    assert episode_return == pytest.approx(0.0)
 ```
 
 - [x] **Step 2: Run the tests and verify RED**
@@ -92,6 +112,7 @@ Add the module constant after imports:
 
 ```python
 REWARD_SHAPING_GAMMA = 0.99
+STACK_SUCCESS_REWARD = 2.0
 ```
 
 Replace `reward()` and add the helper methods below it:
@@ -101,7 +122,7 @@ Replace `reward()` and add the helper methods below it:
         return float(max(self.staged_rewards()))
 
     def _compute_reward(self, action=None, update_reward_state=False):
-        sparse_reward = 2.0 if self._check_success() else 0.0
+        sparse_reward = STACK_SUCCESS_REWARD if self._check_success() else 0.0
         reward = sparse_reward
         if self.reward_shaping:
             potential = self._reward_potential()
@@ -134,7 +155,7 @@ Run:
 pytest tests/test_environments/test_stack.py -q
 ```
 
-Expected: `3 passed`.
+Expected: `5 passed`.
 
 ### Task 2: Initial-potential caching after reset
 
@@ -203,9 +224,36 @@ Run:
 pytest tests/test_environments/test_stack.py -q
 ```
 
-Expected: `4 passed`.
+Expected: `6 passed`.
 
-### Task 3: Regression verification and clean handoff
+### Task 3: Continuous lift, alignment, and placement potential
+
+**Files:**
+- Modify: `tests/test_environments/test_stack.py`
+- Modify: `robosuite/environments/manipulation/stack.py`
+
+- [x] **Step 1: Write failing phase-ordering tests**
+
+Add tests that call `_lift_align_place_potential()` with grasped, lifted, aligned, and placed cube geometry and require a strict increase bounded below `2.0`. Add a second test requiring an untouched table cube to return zero.
+
+- [x] **Step 2: Run tests and verify RED**
+
+Run `pytest tests/test_environments/test_stack.py -q` and verify both tests fail because `_lift_align_place_potential()` does not exist.
+
+- [x] **Step 3: Implement continuous geometry**
+
+Use the original four-centimeter lifted gate, a 15 cm lift span, `10 * horizontal_distance` alignment scale, and 10 cm placement descent span. Combine them as:
+
+```python
+stage_progress = max(lift_progress, alignment)
+r_lift = 0.5 + 0.5 * stage_progress + 0.4 * alignment + 0.5 * alignment**2 * placement
+```
+
+- [x] **Step 4: Run focused and rollout validation**
+
+Require `8 passed` in `test_stack.py`, more than 50% positive rewards over 30 successful HIRL auto-collect trajectories, positive dense-only return, and near-zero return over 10 random failed rollouts.
+
+### Task 4: Regression verification and clean handoff
 
 **Files:**
 - Verify: `robosuite/environments/manipulation/stack.py`
@@ -220,7 +268,7 @@ Run:
 pytest tests/test_environments/test_stack.py tests/test_environments/test_peg_insertion.py -q
 ```
 
-Expected: `27 passed`; the known JAX CUDA plugin compatibility warning may remain and is unrelated.
+Expected: `31 passed`; the known JAX CUDA plugin compatibility warning may remain and is unrelated.
 
 - [x] **Step 2: Run formatting and syntax checks**
 
@@ -244,6 +292,6 @@ git diff -- robosuite/environments/manipulation/stack.py tests/test_environments
 
 Confirm that Stack object placement remains `[0.15, 0.30] / [-0.15, 0.15]`, PegInsertion placement remains untouched by this implementation, and all new Stack edits are limited to reward behavior and its tests.
 
-- [x] **Step 4: Do not stage or commit the dirty production files automatically**
+- [x] **Step 4: Produce the requested clean history**
 
-The checkout was already dirty in both environment files before implementation. Leave the verified implementation in the working tree so the user's placement edits are neither accidentally staged nor folded into an unrelated automated commit.
+After verification, replace the two superseded follow-up commits with one clean commit whose parent is `52747eb4a0881bb0803b301755133f6a4a34fe4c`, then update `origin/main` with `--force-with-lease` as explicitly requested.

@@ -12,6 +12,11 @@ from robosuite.utils.placement_samplers import UniformRandomSampler
 from robosuite.utils.transform_utils import convert_quat
 
 REWARD_SHAPING_GAMMA = 0.99
+STACK_SUCCESS_REWARD = 2.0
+STACK_LIFT_START_HEIGHT = 0.03
+STACK_LIFT_PROGRESS_HEIGHT = 0.15
+STACK_ALIGNMENT_DISTANCE_SCALE = 10.0
+STACK_PLACEMENT_HEIGHT = 0.10
 
 
 class Stack(ManipulationEnv):
@@ -235,11 +240,11 @@ class Stack(ManipulationEnv):
 
             - Reaching: in [0, 0.25], to encourage the arm to reach the cube
             - Grasping: in {0, 0.25}, non-zero if arm is grasping the cube
-            - Lifting: in {0, 1}, non-zero if arm has lifted the cube
-            - Aligning: in [0, 0.5], encourages aligning one cube over the other
+            - Lifting / aligning / placing: in [0, 1.9], continuous progress
+              through lifting cube A, moving it over cube B, and lowering it
             - Stacking: in {0, 2}, non-zero if cube is stacked on other cube
 
-        The potential is max over the following:
+        The potential is the max over the following:
 
             - Reaching + Grasping
             - Lifting + Aligning
@@ -264,7 +269,7 @@ class Stack(ManipulationEnv):
         return float(max(self.staged_rewards()))
 
     def _compute_reward(self, action=None, update_reward_state=False):
-        sparse_reward = 2.0 if self._check_success() else 0.0
+        sparse_reward = STACK_SUCCESS_REWARD if self._check_success() else 0.0
         reward = sparse_reward
         if self.reward_shaping:
             potential = self._reward_potential()
@@ -282,6 +287,29 @@ class Stack(ManipulationEnv):
         reward = self._compute_reward(action=action, update_reward_state=True)
         self.done = (self.timestep >= self.horizon) and not self.ignore_done
         return reward, self.done, {}
+
+    @staticmethod
+    def _lift_align_place_potential(cube_a_pos, cube_b_pos, table_height, grasping):
+        lift_progress = np.clip(
+            (cube_a_pos[2] - (table_height + STACK_LIFT_START_HEIGHT)) / STACK_LIFT_PROGRESS_HEIGHT,
+            0.0,
+            1.0,
+        )
+        alignment = 0.0
+        placement = 0.0
+        cube_lifted = cube_a_pos[2] > table_height + 0.04
+        if cube_lifted:
+            horizontal_distance = np.linalg.norm(cube_a_pos[:2] - cube_b_pos[:2])
+            alignment = 1.0 - np.tanh(STACK_ALIGNMENT_DISTANCE_SCALE * horizontal_distance)
+            target_height = cube_b_pos[2] + 0.045
+            height_above_target = max(cube_a_pos[2] - target_height, 0.0)
+            placement = 1.0 - np.clip(height_above_target / STACK_PLACEMENT_HEIGHT, 0.0, 1.0)
+
+        if not grasping and not cube_lifted:
+            return 0.0
+
+        stage_progress = max(lift_progress, alignment)
+        return float(0.5 + 0.5 * stage_progress + 0.4 * alignment + 0.5 * alignment**2 * placement)
 
     def staged_rewards(self):
         """
@@ -310,22 +338,22 @@ class Stack(ManipulationEnv):
         if grasping_cubeA:
             r_reach += 0.25
 
-        # lifting is successful when the cube is above the table top by a margin
+        # lifting, aligning, and placing use continuous geometric progress
         cubeA_height = cubeA_pos[2]
         table_height = self.table_offset[2]
         cubeA_lifted = cubeA_height > table_height + 0.04
-        r_lift = 1.0 if cubeA_lifted else 0.0
-
-        # Aligning is successful when cubeA is right above cubeB
-        if cubeA_lifted:
-            horiz_dist = np.linalg.norm(np.array(cubeA_pos[:2]) - np.array(cubeB_pos[:2]))
-            r_lift += 0.5 * (1 - np.tanh(horiz_dist))
+        r_lift = self._lift_align_place_potential(
+            cube_a_pos=cubeA_pos,
+            cube_b_pos=cubeB_pos,
+            table_height=table_height,
+            grasping=grasping_cubeA,
+        )
 
         # stacking is successful when the block is lifted and the gripper is not holding the object
         r_stack = 0
         cubeA_touching_cubeB = self.check_contact(self.cubeA, self.cubeB)
-        if not grasping_cubeA and r_lift > 0 and cubeA_touching_cubeB:
-            r_stack = 2.0
+        if not grasping_cubeA and cubeA_lifted and cubeA_touching_cubeB:
+            r_stack = STACK_SUCCESS_REWARD
 
         return r_reach, r_lift, r_stack
 
