@@ -7,6 +7,8 @@
 - Added staged insertion rewards and geometric object-state observations.
 - Changed `PegInsertion` dense reward shaping to use progress deltas from a total staged potential.
 - Penalized misaligned insertion depth in `PegInsertion` dense reward to discourage pushing into the socket before alignment.
+- Changed `Stack` dense reward shaping to add discounted PBRS progress, `0.99 * Phi(s') - Phi(s)`, to the sparse task reward.
+- Moved the default `Stack` object sampling region forward and enabled a narrower seeded-random `PegInsertion` hole region.
 
 ### Design Rationale
 - Kept the environment independent from `NutAssembly` because nut selection and two-peg behavior do not apply.
@@ -14,8 +16,11 @@
 - Preserved the standard seven-dimensional ARX action interface while forcing the gripper component closed for compatibility with existing scripts and datasets.
 - Used potential deltas for dense insertion reward so static poses no longer keep producing shaping reward.
 - Sharpened the depth reward with an alignment-squared gate and negative feedback for depth progress while poorly aligned.
+- Reused the existing maximum staged Stack score as the potential so reward semantics remain stable while repeated static-state rewards are removed.
+- Cached the initial Stack potential after MuJoCo pose propagation so the first transition receives the correct PBRS term.
 
 ### Notes & Caveats
 - The environment supports only `Arx5` with `ArxGripper`.
 - The policy-provided gripper action is ignored.
 - Free-body grasp stability depends on the ARX finger collision geometry and MuJoCo contact parameters.
+- Stack PBRS uses a fixed discount of `0.99`; shaped transitions can exceed `reward_scale` because sparse and shaping rewards are additive.

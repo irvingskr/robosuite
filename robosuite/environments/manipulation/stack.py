@@ -11,6 +11,8 @@ from robosuite.utils.observables import Observable, sensor
 from robosuite.utils.placement_samplers import UniformRandomSampler
 from robosuite.utils.transform_utils import convert_quat
 
+REWARD_SHAPING_GAMMA = 0.99
+
 
 class Stack(ManipulationEnv):
     """
@@ -229,7 +231,7 @@ class Stack(ManipulationEnv):
 
             - a discrete reward of 2.0 is provided if the red block is stacked on the green block
 
-        Un-normalized components if using reward shaping:
+        Un-normalized potential components if using reward shaping:
 
             - Reaching: in [0, 0.25], to encourage the arm to reach the cube
             - Grasping: in {0, 0.25}, non-zero if arm is grasping the cube
@@ -237,16 +239,18 @@ class Stack(ManipulationEnv):
             - Aligning: in [0, 0.5], encourages aligning one cube over the other
             - Stacking: in {0, 2}, non-zero if cube is stacked on other cube
 
-        The reward is max over the following:
+        The potential is max over the following:
 
             - Reaching + Grasping
             - Lifting + Aligning
             - Stacking
 
-        The sparse reward only consists of the stacking component.
+        The sparse reward only consists of the stacking component. The shaped
+        reward adds the PBRS term 0.99 * Phi(s') - Phi(s) to the sparse reward.
 
-        Note that the final reward is normalized and scaled by
-        reward_scale / 2.0 as well so that the max score is equal to reward_scale
+        The final reward is scaled by reward_scale / 2.0, preserving the sparse
+        success reward's previous magnitude. A shaped transition can exceed that
+        magnitude because it also includes the potential difference.
 
         Args:
             action (np array): [NOT USED]
@@ -254,16 +258,30 @@ class Stack(ManipulationEnv):
         Returns:
             float: reward value
         """
-        r_reach, r_lift, r_stack = self.staged_rewards()
+        return self._compute_reward(action=action, update_reward_state=False)
+
+    def _reward_potential(self):
+        return float(max(self.staged_rewards()))
+
+    def _compute_reward(self, action=None, update_reward_state=False):
+        sparse_reward = 2.0 if self._check_success() else 0.0
+        reward = sparse_reward
         if self.reward_shaping:
-            reward = max(r_reach, r_lift, r_stack)
-        else:
-            reward = 2.0 if r_stack > 0 else 0.0
+            potential = self._reward_potential()
+            prev_potential = getattr(self, "_prev_reward_potential", None)
+            if prev_potential is not None:
+                reward += REWARD_SHAPING_GAMMA * potential - prev_potential
+            if update_reward_state:
+                self._prev_reward_potential = potential
 
         if self.reward_scale is not None:
             reward *= self.reward_scale / 2.0
-
         return reward
+
+    def _post_action(self, action):
+        reward = self._compute_reward(action=action, update_reward_state=True)
+        self.done = (self.timestep >= self.horizon) and not self.ignore_done
+        return reward, self.done, {}
 
     def staged_rewards(self):
         """
@@ -377,8 +395,8 @@ class Stack(ManipulationEnv):
             self.placement_initializer = UniformRandomSampler(
                 name="ObjectSampler",
                 mujoco_objects=cubes,
-                x_range=[-0.08, 0.08],
-                y_range=[-0.08, 0.08],
+                x_range=[0.15, 0.30],
+                y_range=[-0.15, 0.15],
                 rotation=None,
                 ensure_object_boundary_in_range=False,
                 ensure_valid_placement=True,
@@ -421,6 +439,12 @@ class Stack(ManipulationEnv):
             # Loop through all objects and reset their positions
             for obj_pos, obj_quat, obj in object_placements.values():
                 self.sim.data.set_joint_qpos(obj.joints[0], np.concatenate([np.array(obj_pos), np.array(obj_quat)]))
+
+        if self.reward_shaping:
+            self.sim.forward()
+            self._prev_reward_potential = self._reward_potential()
+        else:
+            self._prev_reward_potential = None
 
     def _setup_observables(self):
         """

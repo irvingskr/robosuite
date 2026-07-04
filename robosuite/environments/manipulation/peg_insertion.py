@@ -9,10 +9,10 @@ from robosuite.models.tasks import ManipulationTask
 from robosuite.utils.observables import Observable, sensor
 
 
-RANDOMIZE_HOLE_POSITION = False
-FIXED_HOLE_XY = np.array([0.10, 0.00])
-HOLE_X_RANGE = (0.05, 0.15)
-HOLE_Y_RANGE = (-0.10, 0.10)
+RANDOMIZE_HOLE_POSITION = True
+FIXED_HOLE_XY = np.array([0.30, 0.00])
+HOLE_X_RANGE = (0.15, 0.25)
+HOLE_Y_RANGE = (-0.03, 0.03)
 
 PREGRASP_GRIPPER_QPOS = 0.0195
 PEG_HALF_LENGTH = 0.05
