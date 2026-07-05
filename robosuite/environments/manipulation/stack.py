@@ -1,4 +1,5 @@
 from collections import OrderedDict
+from enum import IntEnum
 
 import numpy as np
 
@@ -13,10 +14,35 @@ from robosuite.utils.transform_utils import convert_quat
 
 REWARD_SHAPING_GAMMA = 0.99
 STACK_SUCCESS_REWARD = 2.0
-STACK_LIFT_START_HEIGHT = 0.03
-STACK_LIFT_PROGRESS_HEIGHT = 0.15
+STACK_GRASP_ACQUIRED_REWARD = 0.35
+STACK_GRASP_LOST_PENALTY = 0.45
+STACK_WRONG_OBJECT_GRASP_PENALTY = 0.50
+STACK_GREEN_SHIFT_DEAD_BAND = 0.01
+STACK_GREEN_SHIFT_PENALTY_SCALE = 2.5
+STACK_GREEN_SHIFT_PENALTY_MAX = 0.25
+STACK_REACH_DISTANCE_SCALE = 5.0
+STACK_REACH_WEIGHT = 0.30
+STACK_CONTACT_WEIGHT = 0.20
+STACK_LIFT_START_HEIGHT = 0.02
+STACK_LIFT_PROGRESS_HEIGHT = 0.10
+STACK_LIFT_COMPLETE_HEIGHT = 0.12
+STACK_ALIGNMENT_MIN_HEIGHT = 0.10
 STACK_ALIGNMENT_DISTANCE_SCALE = 10.0
+STACK_ALIGNMENT_COMPLETE_DISTANCE = 0.035
+STACK_ALIGNMENT_EXIT_DISTANCE = 0.055
 STACK_PLACEMENT_HEIGHT = 0.10
+STACK_LIFT_WEIGHT = 0.45
+STACK_ALIGNMENT_WEIGHT = 0.40
+STACK_PLACEMENT_WEIGHT = 0.35
+
+
+class StackRewardStage(IntEnum):
+    """Ordered physical milestones used by Stack's augmented-state potential."""
+
+    APPROACH = 0
+    LIFT = 1
+    ALIGN = 2
+    PLACE = 3
 
 
 class Stack(ManipulationEnv):
@@ -232,30 +258,26 @@ class Stack(ManipulationEnv):
         """
         Reward function for the task.
 
-        Sparse un-normalized reward:
+        The un-normalized potential is defined over an ordered reward stage and
+        the current simulator state. Its nonterminal ranges are [0, 0.50] for
+        approaching / contacting the red cube, [0.50, 0.95] for lifting it,
+        [0.95, 1.35] for alignment, and [1.35, 1.70] for placement. A later
+        range opens only after its physical prerequisite is completed. Success
+        has potential 2.0.
 
-            - a discrete reward of 2.0 is provided if the red block is stacked on the green block
+        Stack success also provides the sparse un-normalized reward 2.0. Reward
+        shaping adds the PBRS term 0.99 * Phi(s') - Phi(s). Grasp acquisition adds
+        a one-time 0.35 event reward, while losing a grasp before success adds an
+        invalid-drop penalty of -0.45; release on a successful stack is exempt.
+        Grasping the green cube adds -0.50, resets task progress, and cannot open
+        a later stage. Moving it away from its reset pose adds a bounded
+        transition penalty, while alignment and placement remain anchored to
+        that reset pose. Holding either cube provides no repeated event bonus,
+        and stationary progressed states retain the PBRS discount cost from
+        gamma = 0.99.
 
-        Un-normalized potential components if using reward shaping:
-
-            - Reaching: in [0, 0.25], to encourage the arm to reach the cube
-            - Grasping: in {0, 0.25}, non-zero if arm is grasping the cube
-            - Lifting / aligning / placing: in [0, 1.9], continuous progress
-              through lifting cube A, moving it over cube B, and lowering it
-            - Stacking: in {0, 2}, non-zero if cube is stacked on other cube
-
-        The potential is the max over the following:
-
-            - Reaching + Grasping
-            - Lifting + Aligning
-            - Stacking
-
-        The sparse reward only consists of the stacking component. The shaped
-        reward adds the PBRS term 0.99 * Phi(s') - Phi(s) to the sparse reward.
-
-        The final reward is scaled by reward_scale / 2.0, preserving the sparse
-        success reward's previous magnitude. A shaped transition can exceed that
-        magnitude because it also includes the potential difference.
+        If reward_scale is not None, the complete sparse, PBRS, and event result
+        is finally multiplied by reward_scale / 2.0.
 
         Args:
             action (np array): [NOT USED]
@@ -265,22 +287,51 @@ class Stack(ManipulationEnv):
         """
         return self._compute_reward(action=action, update_reward_state=False)
 
-    def _reward_potential(self):
-        return float(max(self.staged_rewards()))
+    def _reward_potential(self, snapshot=None):
+        snapshot = self._reward_snapshot() if snapshot is None else snapshot
+        stage = getattr(self, "_reward_stage", StackRewardStage.APPROACH)
+        return self._stage_potential(stage, **snapshot)
 
     def _compute_reward(self, action=None, update_reward_state=False):
-        sparse_reward = STACK_SUCCESS_REWARD if self._check_success() else 0.0
+        snapshot = self._reward_snapshot()
+        success = snapshot["success"]
+        sparse_reward = STACK_SUCCESS_REWARD if success else 0.0
         reward = sparse_reward
         if self.reward_shaping:
-            potential = self._reward_potential()
+            previous_stage = getattr(self, "_reward_stage", StackRewardStage.APPROACH)
+            stage = self._next_reward_stage(previous_stage, **snapshot)
+            potential = self._stage_potential(stage, **snapshot)
             prev_potential = getattr(self, "_prev_reward_potential", None)
+            prev_red_grasped = getattr(self, "_prev_red_grasped", None)
+            prev_green_grasped = getattr(self, "_prev_green_grasped", None)
+            prev_green_shift = getattr(self, "_prev_green_effective_shift", None)
             if prev_potential is not None:
                 reward += REWARD_SHAPING_GAMMA * potential - prev_potential
+            if prev_red_grasped is not None:
+                reward += self._grasp_event_reward(
+                    prev_red_grasped,
+                    snapshot["red_grasped"],
+                    success,
+                )
+            if prev_green_grasped is not None:
+                reward += self._green_grasp_event_reward(
+                    prev_green_grasped,
+                    snapshot["green_grasped"],
+                )
+            if prev_green_shift is not None:
+                reward += self._green_disturbance_reward(
+                    prev_green_shift,
+                    snapshot["green_effective_shift"],
+                )
             if update_reward_state:
+                self._reward_stage = stage
                 self._prev_reward_potential = potential
+                self._prev_red_grasped = snapshot["red_grasped"]
+                self._prev_green_grasped = snapshot["green_grasped"]
+                self._prev_green_effective_shift = snapshot["green_effective_shift"]
 
         if self.reward_scale is not None:
-            reward *= self.reward_scale / 2.0
+            reward *= self.reward_scale / STACK_SUCCESS_REWARD
         return reward
 
     def _post_action(self, action):
@@ -289,73 +340,209 @@ class Stack(ManipulationEnv):
         return reward, self.done, {}
 
     @staticmethod
-    def _lift_align_place_potential(cube_a_pos, cube_b_pos, table_height, grasping):
-        lift_progress = np.clip(
-            (cube_a_pos[2] - (table_height + STACK_LIFT_START_HEIGHT)) / STACK_LIFT_PROGRESS_HEIGHT,
-            0.0,
-            1.0,
-        )
-        alignment = 0.0
-        placement = 0.0
-        cube_lifted = cube_a_pos[2] > table_height + 0.04
-        if cube_lifted:
-            horizontal_distance = np.linalg.norm(cube_a_pos[:2] - cube_b_pos[:2])
-            alignment = 1.0 - np.tanh(STACK_ALIGNMENT_DISTANCE_SCALE * horizontal_distance)
-            target_height = cube_b_pos[2] + 0.045
-            height_above_target = max(cube_a_pos[2] - target_height, 0.0)
-            placement = 1.0 - np.clip(height_above_target / STACK_PLACEMENT_HEIGHT, 0.0, 1.0)
+    def _grasp_event_reward(previous_grasped, grasped, success):
+        if grasped and not previous_grasped:
+            return STACK_GRASP_ACQUIRED_REWARD
+        if previous_grasped and not grasped and not success:
+            return -STACK_GRASP_LOST_PENALTY
+        return 0.0
 
-        if not grasping and not cube_lifted:
+    @staticmethod
+    def _green_grasp_event_reward(previous_grasped, grasped):
+        if grasped and not previous_grasped:
+            return -STACK_WRONG_OBJECT_GRASP_PENALTY
+        return 0.0
+
+    @staticmethod
+    def _green_disturbance_reward(previous_shift, shift):
+        increase = max(shift - previous_shift, 0.0)
+        return -float(
+            min(
+                STACK_GREEN_SHIFT_PENALTY_SCALE * increase,
+                STACK_GREEN_SHIFT_PENALTY_MAX,
+            )
+        )
+
+    @staticmethod
+    def _target_geometry(cube_a_pos, target_pos):
+        horizontal_distance = np.linalg.norm(cube_a_pos[:2] - target_pos[:2])
+        target_height_error = abs(cube_a_pos[2] - (target_pos[2] + 0.045))
+        return float(horizontal_distance), float(target_height_error)
+
+    @staticmethod
+    def _green_effective_shift(cube_b_pos, target_pos):
+        shift = np.linalg.norm(cube_b_pos[:2] - target_pos[:2])
+        return float(max(shift - STACK_GREEN_SHIFT_DEAD_BAND, 0.0))
+
+    @staticmethod
+    def _reach_contact_potential(distance, left_contact, right_contact):
+        reach = 1.0 - np.tanh(STACK_REACH_DISTANCE_SCALE * distance)
+        contact = 0.5 * (float(left_contact) + float(right_contact))
+        return float(STACK_REACH_WEIGHT * reach + STACK_CONTACT_WEIGHT * contact)
+
+    @staticmethod
+    def _next_reward_stage(
+        previous_stage,
+        *,
+        red_grasped,
+        green_grasped,
+        red_height,
+        table_height,
+        horizontal_distance,
+        success,
+        **_,
+    ):
+        previous_stage = StackRewardStage(previous_stage)
+        if success:
+            return previous_stage
+        if green_grasped or not red_grasped:
+            return StackRewardStage.APPROACH
+        if previous_stage is StackRewardStage.APPROACH:
+            return StackRewardStage.LIFT
+        if (
+            previous_stage is StackRewardStage.LIFT
+            and red_height >= table_height + STACK_LIFT_COMPLETE_HEIGHT
+        ):
+            return StackRewardStage.ALIGN
+        if (
+            previous_stage is StackRewardStage.ALIGN
+            and red_height >= table_height + STACK_ALIGNMENT_MIN_HEIGHT
+            and horizontal_distance <= STACK_ALIGNMENT_COMPLETE_DISTANCE
+        ):
+            return StackRewardStage.PLACE
+        if (
+            previous_stage is StackRewardStage.PLACE
+            and horizontal_distance > STACK_ALIGNMENT_EXIT_DISTANCE
+        ):
+            return StackRewardStage.ALIGN
+        return previous_stage
+
+    @staticmethod
+    def _stage_potential(
+        stage,
+        *,
+        distance,
+        red_left_contact,
+        red_right_contact,
+        red_grasped,
+        green_grasped,
+        red_height,
+        table_height,
+        horizontal_distance,
+        target_height_error,
+        success,
+        **_,
+    ):
+        if success:
+            return STACK_SUCCESS_REWARD
+        if green_grasped:
             return 0.0
 
-        stage_progress = max(lift_progress, alignment)
-        return float(0.5 + 0.5 * stage_progress + 0.4 * alignment + 0.5 * alignment**2 * placement)
+        stage = StackRewardStage(stage)
+        if stage is StackRewardStage.APPROACH:
+            return Stack._reach_contact_potential(
+                distance=distance,
+                left_contact=red_left_contact,
+                right_contact=red_right_contact,
+            )
+        if not red_grasped:
+            return 0.0
+        if stage is StackRewardStage.LIFT:
+            lift = np.clip(
+                (red_height - (table_height + STACK_LIFT_START_HEIGHT))
+                / STACK_LIFT_PROGRESS_HEIGHT,
+                0.0,
+                1.0,
+            )
+            return float(0.50 + STACK_LIFT_WEIGHT * lift)
+        if stage is StackRewardStage.ALIGN:
+            if red_height < table_height + STACK_ALIGNMENT_MIN_HEIGHT:
+                return 0.95
+            alignment = 1.0 - np.tanh(STACK_ALIGNMENT_DISTANCE_SCALE * horizontal_distance)
+            return float(0.95 + STACK_ALIGNMENT_WEIGHT * alignment)
+
+        placement = 1.0 - np.clip(target_height_error / STACK_PLACEMENT_HEIGHT, 0.0, 1.0)
+        return float(1.35 + STACK_PLACEMENT_WEIGHT * placement)
+
+    def _grasp_contacts(self, obj=None):
+        object_geoms = (self.cubeA if obj is None else obj).contact_geoms
+
+        def contacts_for_gripper(gripper):
+            left_contact = self.check_contact(
+                gripper.important_geoms["left_fingerpad"],
+                object_geoms,
+            )
+            right_contact = self.check_contact(
+                gripper.important_geoms["right_fingerpad"],
+                object_geoms,
+            )
+            return bool(left_contact), bool(right_contact)
+
+        grippers = self.robots[0].gripper
+        if isinstance(grippers, dict):
+            contact_pairs = [contacts_for_gripper(gripper) for gripper in grippers.values()]
+            return max(contact_pairs, key=sum, default=(False, False))
+        return contacts_for_gripper(grippers)
+
+    def _cube_grasped(self, obj=None):
+        if obj is None:
+            left_contact, right_contact = self._grasp_contacts()
+        else:
+            left_contact, right_contact = self._grasp_contacts(obj)
+        return left_contact and right_contact
+
+    def _reward_snapshot(self):
+        cube_a_pos = np.array(self.sim.data.body_xpos[self.cubeA_body_id], copy=True)
+        cube_b_pos = np.array(self.sim.data.body_xpos[self.cubeB_body_id], copy=True)
+        target_pos = np.array(
+            getattr(self, "_stack_reward_target_pos", cube_b_pos),
+            copy=True,
+        )
+        distance = min(
+            np.linalg.norm(self.sim.data.site_xpos[self.robots[0].eef_site_id[arm]] - cube_a_pos)
+            for arm in self.robots[0].arms
+        )
+        red_left_contact, red_right_contact = self._grasp_contacts()
+        green_left_contact, green_right_contact = self._grasp_contacts(self.cubeB)
+        red_grasped = red_left_contact and red_right_contact
+        green_grasped = green_left_contact and green_right_contact
+        horizontal_distance, target_height_error = self._target_geometry(cube_a_pos, target_pos)
+        cube_a_lifted = cube_a_pos[2] > self.table_offset[2] + 0.04
+        success = bool(
+            not red_grasped
+            and cube_a_lifted
+            and self.check_contact(self.cubeA, self.cubeB)
+        )
+        return {
+            "distance": float(distance),
+            "red_left_contact": red_left_contact,
+            "red_right_contact": red_right_contact,
+            "red_grasped": red_grasped,
+            "green_grasped": green_grasped,
+            "red_height": float(cube_a_pos[2]),
+            "table_height": float(self.table_offset[2]),
+            "horizontal_distance": horizontal_distance,
+            "target_height_error": target_height_error,
+            "green_effective_shift": self._green_effective_shift(cube_b_pos, target_pos),
+            "success": success,
+        }
 
     def staged_rewards(self):
         """
         Helper function to calculate staged rewards based on current physical states.
 
         Returns:
-            3-tuple:
-
-                - (float): reward for reaching and grasping
-                - (float): reward for lifting and aligning
-                - (float): reward for stacking
+            3-tuple containing approach potential, active ordered-stage
+            potential, and physical stack-success potential.
         """
-        # reaching is successful when the gripper site is close to the center of the cube
-        cubeA_pos = self.sim.data.body_xpos[self.cubeA_body_id]
-        cubeB_pos = self.sim.data.body_xpos[self.cubeB_body_id]
-        dist = min(
-            [
-                np.linalg.norm(self.sim.data.site_xpos[self.robots[0].eef_site_id[arm]] - cubeA_pos)
-                for arm in self.robots[0].arms
-            ]
-        )
-        r_reach = (1 - np.tanh(10.0 * dist)) * 0.25
-
-        # grasping reward
-        grasping_cubeA = self._check_grasp(gripper=self.robots[0].gripper, object_geoms=self.cubeA)
-        if grasping_cubeA:
-            r_reach += 0.25
-
-        # lifting, aligning, and placing use continuous geometric progress
-        cubeA_height = cubeA_pos[2]
-        table_height = self.table_offset[2]
-        cubeA_lifted = cubeA_height > table_height + 0.04
-        r_lift = self._lift_align_place_potential(
-            cube_a_pos=cubeA_pos,
-            cube_b_pos=cubeB_pos,
-            table_height=table_height,
-            grasping=grasping_cubeA,
-        )
-
-        # stacking is successful when the block is lifted and the gripper is not holding the object
-        r_stack = 0
-        cubeA_touching_cubeB = self.check_contact(self.cubeA, self.cubeB)
-        if not grasping_cubeA and cubeA_lifted and cubeA_touching_cubeB:
-            r_stack = STACK_SUCCESS_REWARD
-
-        return r_reach, r_lift, r_stack
+        snapshot = self._reward_snapshot()
+        stage = getattr(self, "_reward_stage", StackRewardStage.APPROACH)
+        progress_snapshot = dict(snapshot)
+        progress_snapshot["success"] = False
+        approach = self._stage_potential(StackRewardStage.APPROACH, **progress_snapshot)
+        stage_potential = self._stage_potential(stage, **progress_snapshot)
+        success = STACK_SUCCESS_REWARD if snapshot["success"] else 0.0
+        return approach, stage_potential, success
 
     def _load_model(self):
         """
@@ -468,11 +655,26 @@ class Stack(ManipulationEnv):
             for obj_pos, obj_quat, obj in object_placements.values():
                 self.sim.data.set_joint_qpos(obj.joints[0], np.concatenate([np.array(obj_pos), np.array(obj_quat)]))
 
+        self.sim.forward()
+        self._stack_reward_target_pos = np.array(
+            self.sim.data.body_xpos[self.cubeB_body_id],
+            copy=True,
+        )
+        self._reward_stage = StackRewardStage.APPROACH
         if self.reward_shaping:
-            self.sim.forward()
-            self._prev_reward_potential = self._reward_potential()
+            snapshot = self._reward_snapshot()
+            self._prev_reward_potential = self._stage_potential(
+                self._reward_stage,
+                **snapshot,
+            )
+            self._prev_red_grasped = snapshot["red_grasped"]
+            self._prev_green_grasped = snapshot["green_grasped"]
+            self._prev_green_effective_shift = snapshot["green_effective_shift"]
         else:
             self._prev_reward_potential = None
+            self._prev_red_grasped = None
+            self._prev_green_grasped = None
+            self._prev_green_effective_shift = None
 
     def _setup_observables(self):
         """
@@ -541,8 +743,7 @@ class Stack(ManipulationEnv):
         Returns:
             bool: True if blocks are correctly stacked
         """
-        _, _, r_stack = self.staged_rewards()
-        return r_stack > 0
+        return self._reward_snapshot()["success"]
 
     def visualize(self, vis_settings):
         """

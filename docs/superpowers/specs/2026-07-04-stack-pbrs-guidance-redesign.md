@@ -1,5 +1,16 @@
 # Stack PBRS Guidance Redesign
 
+> **Superseded on 2026-07-05.** HIRL training exposed a reward exploit in this
+> unordered cumulative-transport design: after cube A was lifted, grasping or
+> pushing cube B could improve cube-relative alignment and placement potential.
+> In a representative fixed-cube-A calculation, moving only cube B increased
+> transport potential from about `0.189` to `1.456`. Policies consequently
+> regressed from lifting the red cube to manipulating the green cube and other
+> unstable behavior. The replacement is
+> [`2026-07-05-stack-strict-stage-pbrs-design.md`](2026-07-05-stack-strict-stage-pbrs-design.md),
+> which requires ordered physical milestones and anchors the dense target to
+> cube B's reset pose.
+
 ## Goal
 
 Make Stack's dense reward useful for HIRL learning from reaching through
@@ -139,8 +150,8 @@ This retains the existing staged maximum and the exact
 Track whether cube A was grasped on the previous environment transition:
 
 ```text
-+0.25  when bilateral grasp changes false -> true
--0.35  when bilateral grasp changes true -> false before task success
++0.35  when bilateral grasp changes false -> true
+-0.45  when bilateral grasp changes true -> false before task success
  0.00  otherwise
 ```
 
@@ -213,14 +224,17 @@ Add focused coverage for:
 
 ## Empirical Acceptance
 
-After unit tests pass, collect successful HIRL auto-controller trajectories
-with shaping enabled and compare them with the recorded baseline:
+Focused unit and regression tests verify that:
+
+- every invalid grasp-loss transition is negative;
+- stationary no-progress rewards are non-positive;
+- sparse success remains exactly `1.0` after the default reward scaling.
+
+After those gates pass, collect 10 successful HIRL auto-controller trajectory
+samples with shaping enabled, allowing at most 20 attempts because external
+layout variance can make individual attempts unsuccessful. Compare the samples
+with the recorded baseline:
 
 - every bilateral grasp acquisition transition is positive;
-- every invalid grasp-loss transition is negative;
-- median positive approach reward exceeds the previous approximately
-  `0.000166` median;
-- mean successful preterminal return exceeds the previous `0.4854` baseline;
-- a stationary zero-action rollout has no positive rewards and a non-positive
-  undiscounted shaping return;
-- sparse success remains exactly `1.0` after the default reward scaling.
+- median positive approach reward exceeds `0.000166`;
+- mean successful preterminal return exceeds `0.4854`.

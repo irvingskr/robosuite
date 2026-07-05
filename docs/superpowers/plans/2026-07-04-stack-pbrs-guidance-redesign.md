@@ -1,5 +1,11 @@
 # Stack PBRS Guidance Redesign Implementation Plan
 
+> **Superseded on 2026-07-05.** This plan implemented the unordered transport
+> potential that later allowed green-cube manipulation to earn alignment and
+> placement progress. See
+> [`2026-07-05-stack-strict-stage-pbrs.md`](2026-07-05-stack-strict-stage-pbrs.md)
+> for the replacement plan and the linked design for the recorded failure mode.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Give Stack a stronger, physically grounded reach-to-stack learning signal while retaining `0.99 * Phi(s') - Phi(s)` and preventing positive no-progress rewards.
@@ -426,7 +432,7 @@ def test_grasp_acquisition_bonus_is_one_time_and_read_only_calls_are_idempotent(
         grasped=True,
         previous_grasped=False,
     )
-    expected = 0.99 * 0.60 - 0.35 + 0.25
+    expected = 0.99 * 0.60 - 0.35 + 0.35
 
     assert env.reward(action=None) == pytest.approx(expected)
     assert env.reward(action=None) == pytest.approx(expected)
@@ -449,7 +455,7 @@ def test_invalid_drop_is_penalized_but_successful_release_is_not():
     )
 
     assert dropped.reward(action=None) == pytest.approx(
-        0.99 * 0.35 - 0.60 - 0.35
+        0.99 * 0.35 - 0.60 - 0.45
     )
     assert successful_release.reward(action=None) == pytest.approx(
         2.0 + 0.99 * 2.0 - 1.80
@@ -468,9 +474,9 @@ def test_complete_grasp_drop_event_pair_is_negative():
         success=False,
     )
 
-    assert acquire > 0.0
-    assert drop < 0.0
-    assert acquire + drop < 0.0
+    assert acquire == pytest.approx(0.35)
+    assert drop == pytest.approx(-0.45)
+    assert acquire + drop == pytest.approx(-0.10)
 ```
 
 Update `test_post_action_updates_potential_once_and_stalling_has_discount_cost`
@@ -494,8 +500,8 @@ Expected: FAIL because event reward is not implemented.
 Add constants:
 
 ```python
-STACK_GRASP_ACQUIRED_REWARD = 0.25
-STACK_GRASP_LOST_PENALTY = 0.35
+STACK_GRASP_ACQUIRED_REWARD = 0.35
+STACK_GRASP_LOST_PENALTY = 0.45
 ```
 
 Add:
@@ -602,8 +608,8 @@ else:
 - [ ] **Step 4: Update reward documentation**
 
 In `Stack.reward()`'s docstring, describe the `0.35` reach, `0.25` partial
-contact, `1.8` cumulative transport, `2.0` success potential, one-time `0.25`
-grasp event, and `-0.35` invalid-drop event. State explicitly that repeated
+contact, `1.8` cumulative transport, `2.0` success potential, one-time `0.35`
+grasp event, and `-0.45` invalid-drop event. State explicitly that repeated
 holding has no bonus and remains subject to the PBRS discount cost.
 
 Add under `CHANGELOG.md`'s Unreleased Features:
@@ -694,13 +700,24 @@ env = create_arx_env(
 
 try:
     acquisition_rewards = []
-    approach_positive_rewards = []
-    preterminal_returns = []
-    for episode in range(10):
-        _, _ = env.reset(seed=cfg.common.seed + episode)
+    successful_approach_positive_rewards = []
+    successful_preterminal_returns = []
+    successful_acquisition_rewards = []
+    failed_attempts = []
+    max_attempts = 20
+    target_successes = 10
+    attempts_used = 0
+    for attempt in range(max_attempts):
+        nominal_seed = cfg.common.seed + attempt
+        # HIRL applies this seed to wrapper-level RNG state, but create_arx_env
+        # does not propagate it to robosuite BaseEnv or its placement sampler.
+        _, _ = env.reset(seed=nominal_seed)
+        attempts_used = attempt + 1
         task = _find_stack_env(env)
         previous_grasped = task._cube_grasped()
         rewards = []
+        episode_acquisition_rewards = []
+        episode_approach_positive_rewards = []
         env.get_wrapper_attr("start_intervention")()
         while True:
             _, reward, done, truncated, info = env.step(
@@ -710,30 +727,75 @@ try:
             grasped = task._cube_grasped()
             if grasped and not previous_grasped:
                 acquisition_rewards.append(float(reward))
+                episode_acquisition_rewards.append(float(reward))
             previous_grasped = grasped
             if info.get("current_phase") == "approach" and reward > 0.0:
-                approach_positive_rewards.append(float(reward))
+                episode_approach_positive_rewards.append(float(reward))
             if done or truncated:
-                if not info.get("success", False):
-                    raise AssertionError(f"episode {episode} did not stack")
-                preterminal_returns.append(float(np.sum(rewards[:-1])))
+                if info.get("success", False):
+                    successful_preterminal_returns.append(
+                        float(np.sum(rewards[:-1]))
+                    )
+                    successful_acquisition_rewards.append(
+                        episode_acquisition_rewards
+                    )
+                    successful_approach_positive_rewards.extend(
+                        episode_approach_positive_rewards
+                    )
+                else:
+                    failed_attempts.append(
+                        {
+                            "attempt": attempt,
+                            "nominal_seed": nominal_seed,
+                            "steps": len(rewards),
+                            "done": bool(done),
+                            "truncated": bool(truncated),
+                            "phase": info.get("current_phase"),
+                            "return": float(np.sum(rewards)),
+                        }
+                    )
                 break
+        if len(successful_preterminal_returns) == target_successes:
+            break
 
+    success_count = len(successful_preterminal_returns)
+    print("failed attempt count:", len(failed_attempts))
+    print("failed attempt details:", failed_attempts)
+    assert success_count + len(failed_attempts) == attempts_used
+    assert success_count == target_successes
+    assert attempts_used <= max_attempts
+    assert len(successful_acquisition_rewards) == success_count
+    assert all(
+        rewards and all(reward > 0.0 for reward in rewards)
+        for rewards in successful_acquisition_rewards
+    )
+    assert acquisition_rewards
+    assert all(reward > 0.0 for reward in acquisition_rewards)
+    assert successful_approach_positive_rewards
+
+    median_positive_approach_reward = np.median(
+        successful_approach_positive_rewards
+    )
+    mean_successful_preterminal_return = np.mean(
+        successful_preterminal_returns
+    )
     print("acquisition rewards:", acquisition_rewards)
-    print("median positive approach reward:", np.median(approach_positive_rewards))
-    print("mean preterminal return:", np.mean(preterminal_returns))
-    assert len(acquisition_rewards) >= 10
-    assert min(acquisition_rewards) > 0.0
-    assert np.median(approach_positive_rewards) > 0.000166
-    assert np.mean(preterminal_returns) > 0.4854
+    print("median positive approach reward:", median_positive_approach_reward)
+    print(
+        "mean successful preterminal return:",
+        mean_successful_preterminal_return,
+    )
+    assert median_positive_approach_reward > 0.000166
+    assert mean_successful_preterminal_return > 0.4854
 finally:
     env.close()
 PY
 ```
 
-Expected: ten successful episodes; every grasp-acquisition reward is positive;
-the median positive approach reward exceeds `0.000166`; mean preterminal return
-exceeds `0.4854`.
+Expected: 10 successful trajectories within at most 20 attempts; each successful
+trajectory has at least one positive grasp-acquisition reward and every recorded
+grasp-acquisition reward is positive; the median positive approach reward exceeds
+`0.000166`; mean successful preterminal return exceeds `0.4854`.
 
 - [ ] **Step 3: Run repository hygiene checks**
 
