@@ -56,8 +56,8 @@
   </worldbody>
 
   <actuator>
-    <position ctrllimited="true" ctrlrange="0.000 0.044" joint="finger_joint1" kp="1000" name="gripper_finger_joint1" forcelimited="true" forcerange="-50 50"/>
-    <position ctrllimited="true" ctrlrange="0.000 0.044" joint="finger_joint2" kp="1000" name="gripper_finger_joint2" forcelimited="true" forcerange="-50 50"/>
+    <position ctrllimited="true" ctrlrange="0.012 0.044" joint="finger_joint1" kp="1000" name="gripper_finger_joint1" forcelimited="true" forcerange="-80 80"/>
+    <position ctrllimited="true" ctrlrange="0.012 0.044" joint="finger_joint2" kp="1000" name="gripper_finger_joint2" forcelimited="true" forcerange="-80 80"/>
   </actuator>
   <sensor>
       <force name="force_ee" site="ft_frame"/>
