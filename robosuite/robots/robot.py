@@ -110,7 +110,7 @@ class Robot(object):
         elif self.initialization_noise == "default":
             self.initialization_noise = {"magnitude": 0.02, "type": "gaussian"}
         self.initialization_noise["magnitude"] = (
-            self.initialization_noise["magnitude"] if self.initialization_noise["magnitude"] else 0.0
+            self.initialization_noise["magnitude"] if self.initialization_noise["magnitude"] is not None else 0.0
         )
 
         self.init_qpos = initial_qpos  # n-dim list / array of robot joints
@@ -245,15 +245,37 @@ class Robot(object):
         if rng is None:
             rng = np.random.default_rng()
         init_qpos = np.array(self.init_qpos)
+        noise_magnitude = np.asarray(self.initialization_noise["magnitude"], dtype=float)
+        if noise_magnitude.ndim == 0:
+            noise_magnitude = np.full(len(self.init_qpos), float(noise_magnitude))
+        elif noise_magnitude.shape != (len(self.init_qpos),):
+            raise ValueError(
+                "initialization_noise['magnitude'] must be a scalar or have one value per init_qpos entry; "
+                f"got shape {noise_magnitude.shape} for {len(self.init_qpos)} joints"
+            )
+        clip_noisy_qpos = False
         if not deterministic:
             # Determine noise
             if self.initialization_noise["type"] == "gaussian":
-                noise = rng.standard_normal(len(self.init_qpos)) * self.initialization_noise["magnitude"]
+                noise = rng.standard_normal(len(self.init_qpos)) * noise_magnitude
             elif self.initialization_noise["type"] == "uniform":
-                noise = rng.uniform(-1.0, 1.0, len(self.init_qpos)) * self.initialization_noise["magnitude"]
+                noise = rng.uniform(-1.0, 1.0, len(self.init_qpos)) * noise_magnitude
             else:
                 raise ValueError("Error: Invalid noise type specified. Options are 'gaussian' or 'uniform'.")
             init_qpos += noise
+            clip_noisy_qpos = np.any(noise_magnitude > 0.0)
+
+        if clip_noisy_qpos:
+            joint_ranges = self.sim.model.jnt_range[self._ref_joint_indexes]
+            joint_limited = self.sim.model.jnt_limited[self._ref_joint_indexes].astype(bool)
+            if np.any(joint_limited):
+                low = joint_ranges[:, 0]
+                high = joint_ranges[:, 1]
+                init_qpos = np.where(
+                    joint_limited,
+                    np.clip(init_qpos, low, high),
+                    init_qpos,
+                )
 
         # Set initial position in sim
         self.sim.data.qpos[self._ref_joint_pos_indexes] = init_qpos

@@ -9,18 +9,19 @@ from robosuite.models.tasks import ManipulationTask
 from robosuite.utils.observables import Observable, sensor
 
 
-RANDOMIZE_HOLE_POSITION = True
-FIXED_HOLE_XY = np.array([0.30, 0.00])
-HOLE_X_RANGE = (0.15, 0.25)
-HOLE_Y_RANGE = (-0.03, 0.03)
+RANDOMIZE_HOLE_POSITION = False
+FIXED_HOLE_XY = np.array([0.27, 0.00])
+HOLE_X_RANGE = (0.22, 0.30)
+HOLE_Y_RANGE = (-0.10, 0.10)
 
 PREGRASP_GRIPPER_QPOS = 0.0195
+INITIAL_CLEARANCE_ABOVE_HOLE = 0.02
 PEG_HALF_LENGTH = 0.05
 PEG_GRASP_OVERLAP = 0.03
 SUCCESS_DEPTH = 0.04
 SUCCESS_XY_ERROR = 0.003
-SUCCESS_ANGLE = np.deg2rad(5.0)
 ALIGNMENT_ANGLE = np.deg2rad(10.0)
+MAX_SAFE_RESET_ATTEMPTS = 100
 
 
 class PegInsertion(ManipulationEnv):
@@ -136,6 +137,21 @@ class PegInsertion(ManipulationEnv):
         gripper = self.robots[0].gripper["right"]
         self.right_finger_geom_id = self.sim.model.geom_name2id(gripper.important_geoms["right_fingerpad"][0])
         self.left_finger_geom_id = self.sim.model.geom_name2id(gripper.important_geoms["left_fingerpad"][1])
+        self.hole_wall_geom_ids = {
+            geom_id
+            for geom_id in range(self.sim.model.ngeom)
+            if self.sim.model.geom_bodyid[geom_id] == self.hole_body_id
+            and "wall" in self.sim.model.geom_id2name(geom_id)
+        }
+        self.initial_safety_geom_ids = {
+            self.right_finger_geom_id,
+            self.left_finger_geom_id,
+            *[
+                geom_id
+                for geom_id in range(self.sim.model.ngeom)
+                if self.sim.model.geom_bodyid[geom_id] == self.peg_body_id
+            ],
+        }
 
     def _pre_action(self, action, policy_step=False):
         forced_action = np.array(action, dtype=float, copy=True)
@@ -148,18 +164,25 @@ class PegInsertion(ManipulationEnv):
             np.full(2, PREGRASP_GRIPPER_QPOS, dtype=float),
             gripper_arm="right",
         )
+        actuator_ids = robot._ref_joint_gripper_actuator_indexes["right"]
+        actuator_range = self.sim.model.actuator_ctrlrange[actuator_ids]
+        actuator_bias = 0.5 * (actuator_range[:, 1] + actuator_range[:, 0])
+        actuator_weight = 0.5 * (actuator_range[:, 1] - actuator_range[:, 0])
+        robot.gripper["right"].current_action = np.clip(
+            (PREGRASP_GRIPPER_QPOS - actuator_bias) / actuator_weight,
+            -1.0,
+            1.0,
+        )
         self.sim.forward()
 
         right_pos = np.array(self.sim.data.geom_xpos[self.right_finger_geom_id])
         left_pos = np.array(self.sim.data.geom_xpos[self.left_finger_geom_id])
         pad_midpoint = 0.5 * (right_pos + left_pos)
         pad_mat = np.array(self.sim.data.geom_xmat[self.right_finger_geom_id]).reshape(3, 3)
-        pad_x_xy = pad_mat[:2, 0]
-        yaw = np.arctan2(pad_x_xy[1], pad_x_xy[0])
-        peg_quat_xyzw = T.mat2quat(T.euler2mat(np.array([0.0, 0.0, yaw])))
+        peg_mat = np.column_stack((pad_mat[:, 2], pad_mat[:, 1], -pad_mat[:, 0]))
+        peg_quat_xyzw = T.mat2quat(peg_mat)
         peg_quat_wxyz = T.convert_quat(peg_quat_xyzw, to="wxyz")
-        peg_center = pad_midpoint.copy()
-        peg_center[2] -= PEG_HALF_LENGTH - PEG_GRASP_OVERLAP / 2.0
+        peg_center = pad_midpoint + pad_mat[:, 0] * (PEG_HALF_LENGTH - PEG_GRASP_OVERLAP / 2.0)
 
         self.sim.data.set_joint_qpos(
             self.peg_joint,
@@ -182,10 +205,56 @@ class PegInsertion(ManipulationEnv):
         self.sim.model.body_pos[self.hole_body_id] = np.array([xy[0], xy[1], self.table_offset[2]])
         self.sim.forward()
 
+    def _has_initial_hole_column_contact(self):
+        for contact_id in range(self.sim.data.ncon):
+            contact = self.sim.data.contact[contact_id]
+            geom1 = int(contact.geom1)
+            geom2 = int(contact.geom2)
+            if (
+                geom1 in self.hole_wall_geom_ids
+                and geom2 in self.initial_safety_geom_ids
+            ) or (
+                geom2 in self.hole_wall_geom_ids
+                and geom1 in self.initial_safety_geom_ids
+            ):
+                return True
+        return False
+
+    def _has_initial_hole_column_clearance(self):
+        hole_mouth = np.array(self.sim.data.site_xpos[self.hole_mouth_site_id])
+        hole_axis = np.array(self.sim.data.site_xmat[self.hole_axis_site_id]).reshape(3, 3)[:, 2]
+        hole_axis = hole_axis / np.linalg.norm(hole_axis)
+        required_clearance = INITIAL_CLEARANCE_ABOVE_HOLE
+        positions = [
+            np.array(self.sim.data.site_xpos[self.peg_bottom_site_id]),
+            np.array(self.sim.data.geom_xpos[self.right_finger_geom_id]),
+            np.array(self.sim.data.geom_xpos[self.left_finger_geom_id]),
+        ]
+        return all(
+            float(np.dot(position - hole_mouth, hole_axis)) >= required_clearance
+            for position in positions
+        )
+
     def _reset_internal(self):
         super()._reset_internal()
         self._reset_hole_position()
-        self._set_pregrasp_pose()
+        for attempt in range(MAX_SAFE_RESET_ATTEMPTS):
+            if attempt > 0:
+                for robot in self.robots:
+                    robot.reset(deterministic=self.deterministic_reset, rng=self.rng)
+            self._set_pregrasp_pose()
+            reset_is_safe = (
+                not self._has_initial_hole_column_contact()
+                and self._has_initial_hole_column_clearance()
+            )
+            if reset_is_safe:
+                break
+        else:
+            raise RuntimeError(
+                "Failed to sample a PegInsertion reset with initial peg/fingerpads at least "
+                f"{INITIAL_CLEARANCE_ABOVE_HOLE:.3f}m above the hole column and without "
+                f"hole-wall contact after {MAX_SAFE_RESET_ATTEMPTS} attempts"
+            )
         self._prev_reward_potential = None
 
     @staticmethod
@@ -277,15 +346,22 @@ class PegInsertion(ManipulationEnv):
     def _post_action(self, action):
         reward = self._compute_reward(action=action, update_reward_state=True)
         self.done = (self.timestep >= self.horizon) and not self.ignore_done
-        return reward, self.done, {}
+        metrics = self._compute_insertion_metrics()
+        return reward, self.done, {
+            "success": int(self._check_success()),
+            "peg_insertion_metrics": {
+                "insertion_depth": metrics["insertion_depth"],
+                "xy_error": metrics["xy_error"],
+                "vertical_angle": metrics["vertical_angle"],
+                "yaw_error": metrics["yaw_error"],
+            },
+        }
 
     def _check_success(self):
         metrics = self._compute_insertion_metrics()
         return bool(
             metrics["insertion_depth"] >= SUCCESS_DEPTH
             and metrics["xy_error"] <= SUCCESS_XY_ERROR
-            and metrics["vertical_angle"] <= SUCCESS_ANGLE
-            and metrics["yaw_error"] <= SUCCESS_ANGLE
         )
 
     def _setup_observables(self):
