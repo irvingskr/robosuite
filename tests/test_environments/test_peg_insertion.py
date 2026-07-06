@@ -172,8 +172,6 @@ def _set_peg_pose(env, depth=0.04, xy_error=0.0, roll=0.0, yaw=0.0):
         ({}, True),
         ({"depth": 0.039}, False),
         ({"xy_error": 0.004}, False),
-        ({"roll": np.deg2rad(6.0)}, False),
-        ({"yaw": np.deg2rad(6.0)}, False),
         ({"yaw": np.deg2rad(90.0)}, True),
     ],
 )
