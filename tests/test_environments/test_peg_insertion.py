@@ -22,18 +22,27 @@ def test_square_peg_object_contract():
     assert len(geoms) == 1
     assert geoms[0].get("type") == "box"
     assert np.allclose(np.fromstring(geoms[0].get("size"), sep=" "), [0.02, 0.02, 0.05])
+    visual_geoms = [geom for geom in peg.get_obj().iter("geom") if geom.get("group") == "1"]
+    assert len(visual_geoms) == 1
+    assert visual_geoms[0].get("material").endswith("peg_red")
 
 
 def test_square_hole_object_contract():
-    hole = SquareHoleObject(name="hole")
+    hole = SquareHoleObject(name="hole", movable=True)
 
-    assert hole.joints == []
+    assert len(hole.joints) == 3
+    assert hole.joints[0].endswith("slide_x")
+    assert hole.joints[1].endswith("slide_y")
+    assert hole.joints[2].endswith("yaw")
     assert set(hole.important_sites) >= {"mouth", "bottom", "axis"}
     assert set(hole.important_sites.values()) <= set(hole.sites)
     geoms = _collision_geoms(hole)
     assert len(geoms) == 5
     assert np.allclose(hole.bottom_offset, [0.0, 0.0, 0.0])
     assert np.allclose(hole.top_offset, [0.0, 0.0, 0.065])
+
+    fixed_hole = SquareHoleObject(name="fixed_hole")
+    assert fixed_hole.joints == []
 
 
 def _make_env(**kwargs):
@@ -57,6 +66,8 @@ def test_peg_insertion_is_registered_and_builds():
     try:
         assert env.peg.root_body in env.sim.model.body_names
         assert env.hole.root_body in env.sim.model.body_names
+        camera_id = env.sim.model.camera_name2id("agentview")
+        assert np.allclose(env.sim.model.cam_pos[camera_id], peg_module.AGENTVIEW_POSITION)
     finally:
         env.close()
 
@@ -92,12 +103,38 @@ def test_reset_places_peg_between_fingers_and_grasps_it():
             + env.sim.data.geom_xpos[env.right_finger_geom_id]
         )
         peg_center = env.sim.data.site_xpos[env.peg_center_site_id]
-        assert np.linalg.norm(peg_center[:2] - pad_midpoint[:2]) < 0.005
-        assert peg_center[2] < pad_midpoint[2]
+        pad_mat = env.sim.data.geom_xmat[env.right_finger_geom_id].reshape(3, 3)
+        expected_center = pad_midpoint + pad_mat[:, 0] * (
+            peg_module.PEG_HALF_LENGTH - peg_module.PEG_GRASP_OVERLAP / 2.0
+        )
+        assert np.allclose(peg_center, expected_center, atol=1e-6)
+        assert env._has_initial_peg_clearance_from_fk()
 
         action = np.zeros(env.action_dim)
         env.step(action)
         assert _peg_contacts(env) == {"left": True, "right": True}
+    finally:
+        env.close()
+
+
+def test_randomized_reset_rejects_joint_limit_clipping():
+    env = _make_env(
+        seed=7201,
+        initialization_noise={
+            "type": "uniform",
+            "magnitude": [0.0, 0.0, 0.0, 0.4, 0.4, 0.4],
+        },
+    )
+    try:
+        for _ in range(20):
+            env.reset()
+            robot = env.robots[0]
+            qpos = env.sim.data.qpos[robot._ref_joint_pos_indexes]
+            joint_ids = robot._ref_joint_indexes
+            ranges = env.sim.model.jnt_range[joint_ids]
+            limited = env.sim.model.jnt_limited[joint_ids].astype(bool)
+            assert np.all(qpos[limited] > ranges[limited, 0] + 1e-4)
+            assert np.all(qpos[limited] < ranges[limited, 1] - 1e-4)
     finally:
         env.close()
 
@@ -117,25 +154,29 @@ def test_pre_action_forces_close_without_mutating_input(requested_gripper):
         env.close()
 
 
-def test_fixed_hole_position_is_restored(monkeypatch):
-    monkeypatch.setattr(peg_module, "RANDOMIZE_HOLE_POSITION", False)
-    env = _make_env()
+def test_fixed_hole_position_is_restored():
+    env = _make_env(randomize_hole_position=False)
     try:
         env.reset()
         first = env.sim.data.body_xpos[env.hole_body_id].copy()
-        env.sim.model.body_pos[env.hole_body_id, :2] = [-0.2, 0.2]
+        assert env.hole_planar_joints == ()
+        assert env.hole_yaw_joint is None
+        for _ in range(20):
+            env.step(np.zeros(env.action_dim))
+        after_steps = env.sim.data.body_xpos[env.hole_body_id].copy()
         env.reset()
         second = env.sim.data.body_xpos[env.hole_body_id].copy()
         assert np.allclose(first[:2], peg_module.FIXED_HOLE_XY)
+        assert np.allclose(after_steps, first)
         assert np.allclose(second[:2], peg_module.FIXED_HOLE_XY)
     finally:
         env.close()
 
 
-def test_random_hole_position_is_seeded_and_in_range(monkeypatch):
-    monkeypatch.setattr(peg_module, "RANDOMIZE_HOLE_POSITION", True)
-    env1 = _make_env(seed=7)
-    env2 = _make_env(seed=7)
+def test_random_hole_position_is_seeded_and_in_circle():
+    radius = 0.10
+    env1 = _make_env(seed=7, randomize_hole_position=True, hole_position_radius=radius)
+    env2 = _make_env(seed=7, randomize_hole_position=True, hole_position_radius=radius)
     try:
         sequence1 = []
         sequence2 = []
@@ -145,19 +186,51 @@ def test_random_hole_position_is_seeded_and_in_range(monkeypatch):
             sequence1.append(env1.sim.data.body_xpos[env1.hole_body_id, :2].copy())
             sequence2.append(env2.sim.data.body_xpos[env2.hole_body_id, :2].copy())
         assert np.allclose(sequence1, sequence2)
-        assert all(peg_module.HOLE_X_RANGE[0] <= xy[0] <= peg_module.HOLE_X_RANGE[1] for xy in sequence1)
-        assert all(peg_module.HOLE_Y_RANGE[0] <= xy[1] <= peg_module.HOLE_Y_RANGE[1] for xy in sequence1)
+        assert all(np.linalg.norm(xy - peg_module.FIXED_HOLE_XY) <= radius + 1e-9 for xy in sequence1)
         assert not np.allclose(sequence1[0], sequence1[1])
+        yaw = env1.sim.data.get_joint_qpos(env1.hole_yaw_joint)
+        assert -peg_module.HOLE_YAW_RANGE <= yaw <= peg_module.HOLE_YAW_RANGE
     finally:
         env1.close()
         env2.close()
 
 
+def test_hole_slides_as_one_rigid_structure():
+    env = _make_env(randomize_hole_position=True)
+    try:
+        env.reset()
+        initial = env.sim.data.body_xpos[env.hole_body_id].copy()
+        initial_joint_values = [
+            env.sim.data.get_joint_qpos(joint) for joint in env.hole_planar_joints
+        ]
+        env.sim.data.set_joint_qpos(env.hole_slide_joints[0], initial_joint_values[0] + 0.02)
+        env.sim.data.set_joint_qpos(env.hole_slide_joints[1], initial_joint_values[1] - 0.01)
+        env.sim.data.set_joint_qpos(env.hole_yaw_joint, initial_joint_values[2] + 0.2)
+        env.sim.forward()
+
+        moved = env.sim.data.body_xpos[env.hole_body_id].copy()
+        assert np.allclose(moved - initial, [0.02, -0.01, 0.0], atol=1e-7)
+        assert np.allclose(
+            env.sim.data.body_xmat[env.hole_body_id].reshape(3, 3),
+            T.euler2mat(np.array([0.0, 0.0, initial_joint_values[2] + 0.2])),
+            atol=1e-7,
+        )
+        geom_body_ids = {
+            env.sim.model.geom_bodyid[env.sim.model.geom_name2id(name)]
+            for name in env.hole.contact_geoms
+        }
+        assert geom_body_ids == {env.hole_body_id}
+    finally:
+        env.close()
+
+
 def _set_peg_pose(env, depth=0.04, xy_error=0.0, roll=0.0, yaw=0.0):
-    quat_xyzw = T.mat2quat(T.euler2mat(np.array([roll, 0.0, yaw])))
-    peg_axis = T.quat2mat(quat_xyzw) @ np.array([0.0, 0.0, 1.0])
+    hole_mat = env.sim.data.body_xmat[env.hole_body_id].reshape(3, 3)
+    peg_mat = hole_mat @ T.euler2mat(np.array([roll, 0.0, yaw]))
+    quat_xyzw = T.mat2quat(peg_mat)
+    peg_axis = peg_mat[:, 2]
     mouth = env.sim.data.site_xpos[env.hole_mouth_site_id].copy()
-    bottom = mouth + np.array([xy_error, 0.0, -depth])
+    bottom = mouth + xy_error * hole_mat[:, 0] - depth * hole_mat[:, 2]
     center = bottom + PEG_HALF_LENGTH * peg_axis
     env.sim.data.set_joint_qpos(
         env.peg_joint,
@@ -169,10 +242,12 @@ def _set_peg_pose(env, depth=0.04, xy_error=0.0, roll=0.0, yaw=0.0):
 @pytest.mark.parametrize(
     "pose, expected",
     [
-        ({}, True),
+        ({"depth": 0.041}, True),
         ({"depth": 0.039}, False),
         ({"xy_error": 0.004}, False),
-        ({"yaw": np.deg2rad(90.0)}, True),
+        ({"depth": 0.041, "roll": np.deg2rad(6.0)}, True),
+        ({"depth": 0.041, "yaw": np.deg2rad(6.0)}, True),
+        ({"depth": 0.041, "yaw": np.deg2rad(90.0)}, True),
     ],
 )
 def test_success_boundaries(pose, expected):

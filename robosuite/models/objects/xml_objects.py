@@ -184,13 +184,24 @@ class SquarePegObject(MujocoXMLObject):
 
 
 class SquareHoleObject(MujocoXMLObject):
-    """Fixed table-mounted square socket used by PegInsertion."""
+    """Square socket used by PegInsertion, optionally movable in the table plane.
 
-    def __init__(self, name):
+    The base and all four walls remain geoms of one rigid body. Two slide
+    joints and one yaw hinge are added only when ``movable`` is true.
+    """
+
+    def __init__(self, name, movable=False):
+        joints = None
+        if movable:
+            joints = [
+                dict(name="slide_x", type="slide", axis="1 0 0", damping="1.0"),
+                dict(name="slide_y", type="slide", axis="0 1 0", damping="1.0"),
+                dict(name="yaw", type="hinge", axis="0 0 1", damping="1.0"),
+            ]
         super().__init__(
             xml_path_completion("objects/square-hole.xml"),
             name=name,
-            joints=None,
+            joints=joints,
             obj_type="all",
             duplicate_collision_geoms=True,
         )

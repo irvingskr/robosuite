@@ -9,13 +9,15 @@ from robosuite.models.tasks import ManipulationTask
 from robosuite.utils.observables import Observable, sensor
 
 
-RANDOMIZE_HOLE_POSITION = False
+RANDOMIZE_HOLE_POSITION = True
 FIXED_HOLE_XY = np.array([0.27, 0.00])
-HOLE_X_RANGE = (0.22, 0.30)
-HOLE_Y_RANGE = (-0.10, 0.10)
+HOLE_POSITION_RADIUS = 0.05
+HOLE_YAW_RANGE = np.pi / 4.0
+AGENTVIEW_POSITION = np.array([0.6, 0.0, 1.35])
+AGENTVIEW_QUATERNION = np.array([0.653, 0.271, 0.271, 0.653])
 
 PREGRASP_GRIPPER_QPOS = 0.0195
-INITIAL_CLEARANCE_ABOVE_HOLE = 0.02
+INITIAL_CLEARANCE_ABOVE_HOLE = 0.01
 PEG_HALF_LENGTH = 0.05
 PEG_GRASP_OVERLAP = 0.03
 SUCCESS_DEPTH = 0.04
@@ -35,9 +37,12 @@ class PegInsertion(ManipulationEnv):
         gripper_types="default",
         base_types="default",
         initialization_noise="default",
-        table_full_size=(0.8, 0.8, 0.05),
+        table_full_size=(1.0, 0.8, 0.05),
         table_friction=(1, 0.005, 0.0001),
         table_offset=(0, 0, 0.82),
+        randomize_hole_position=RANDOMIZE_HOLE_POSITION,
+        hole_position_radius=HOLE_POSITION_RADIUS,
+        hole_yaw_range=HOLE_YAW_RANGE,
         use_camera_obs=True,
         use_object_obs=True,
         reward_scale=1.0,
@@ -70,6 +75,13 @@ class PegInsertion(ManipulationEnv):
         self.use_object_obs = use_object_obs
         self.reward_scale = reward_scale
         self.reward_shaping = reward_shaping
+        self.randomize_hole_position = bool(randomize_hole_position)
+        self.hole_position_radius = float(hole_position_radius)
+        self.hole_yaw_range = float(hole_yaw_range)
+        if self.hole_position_radius < 0.0:
+            raise ValueError("hole_position_radius must be non-negative")
+        if self.hole_yaw_range < 0.0:
+            raise ValueError("hole_yaw_range must be non-negative")
         super().__init__(
             robots=robots,
             env_configuration=env_configuration,
@@ -115,8 +127,13 @@ class PegInsertion(ManipulationEnv):
             table_offset=self.table_offset,
         )
         arena.set_origin([0, 0, 0])
+        arena.set_camera(
+            camera_name="agentview",
+            pos=AGENTVIEW_POSITION,
+            quat=AGENTVIEW_QUATERNION,
+        )
         self.peg = SquarePegObject(name="peg")
-        self.hole = SquareHoleObject(name="hole")
+        self.hole = SquareHoleObject(name="hole", movable=self.randomize_hole_position)
         self.hole.set_pos([FIXED_HOLE_XY[0], FIXED_HOLE_XY[1], self.table_offset[2]])
         self.model = ManipulationTask(
             mujoco_arena=arena,
@@ -130,6 +147,15 @@ class PegInsertion(ManipulationEnv):
         self.hole_body_id = self.sim.model.body_name2id(self.hole.root_body)
         self.peg_joint = self.peg.joints[0]
         self.peg_qvel_addr = self.sim.model.get_joint_qvel_addr(self.peg_joint)
+        self.hole_planar_joints = tuple(self.hole.joints)
+        expected_hole_joints = 3 if self.randomize_hole_position else 0
+        if len(self.hole_planar_joints) != expected_hole_joints:
+            raise RuntimeError("PegInsertion hole must expose x, y, and yaw planar joints")
+        self.hole_slide_joints = self.hole_planar_joints[:2]
+        self.hole_yaw_joint = self.hole_planar_joints[2] if self.hole_planar_joints else None
+        self.hole_qvel_addrs = tuple(
+            self.sim.model.get_joint_qvel_addr(joint) for joint in self.hole_planar_joints
+        )
         self.peg_center_site_id = self.sim.model.site_name2id(self.peg.important_sites["center"])
         self.peg_bottom_site_id = self.sim.model.site_name2id(self.peg.important_sites["bottom"])
         self.hole_mouth_site_id = self.sim.model.site_name2id(self.hole.important_sites["mouth"])
@@ -137,21 +163,6 @@ class PegInsertion(ManipulationEnv):
         gripper = self.robots[0].gripper["right"]
         self.right_finger_geom_id = self.sim.model.geom_name2id(gripper.important_geoms["right_fingerpad"][0])
         self.left_finger_geom_id = self.sim.model.geom_name2id(gripper.important_geoms["left_fingerpad"][1])
-        self.hole_wall_geom_ids = {
-            geom_id
-            for geom_id in range(self.sim.model.ngeom)
-            if self.sim.model.geom_bodyid[geom_id] == self.hole_body_id
-            and "wall" in self.sim.model.geom_id2name(geom_id)
-        }
-        self.initial_safety_geom_ids = {
-            self.right_finger_geom_id,
-            self.left_finger_geom_id,
-            *[
-                geom_id
-                for geom_id in range(self.sim.model.ngeom)
-                if self.sim.model.geom_bodyid[geom_id] == self.peg_body_id
-            ],
-        }
 
     def _pre_action(self, action, policy_step=False):
         forced_action = np.array(action, dtype=float, copy=True)
@@ -193,46 +204,51 @@ class PegInsertion(ManipulationEnv):
         self.sim.forward()
 
     def _reset_hole_position(self):
-        if RANDOMIZE_HOLE_POSITION:
-            xy = np.array(
-                [
-                    self.rng.uniform(*HOLE_X_RANGE),
-                    self.rng.uniform(*HOLE_Y_RANGE),
-                ]
-            )
+        if not self.hole_planar_joints:
+            return
+        if self.randomize_hole_position and self.hole_position_radius > 0.0:
+            radius = self.hole_position_radius * np.sqrt(self.rng.uniform())
+            angle = self.rng.uniform(-np.pi, np.pi)
+            offset = radius * np.array([np.cos(angle), np.sin(angle)])
         else:
-            xy = FIXED_HOLE_XY
-        self.sim.model.body_pos[self.hole_body_id] = np.array([xy[0], xy[1], self.table_offset[2]])
+            offset = np.zeros(2, dtype=float)
+        yaw = self.rng.uniform(-self.hole_yaw_range, self.hole_yaw_range)
+        for joint, value in zip(self.hole_planar_joints, (*offset, yaw)):
+            self.sim.data.set_joint_qpos(joint, float(value))
+        for addr in self.hole_qvel_addrs:
+            self.sim.data.qvel[addr] = 0.0
         self.sim.forward()
 
-    def _has_initial_hole_column_contact(self):
-        for contact_id in range(self.sim.data.ncon):
-            contact = self.sim.data.contact[contact_id]
-            geom1 = int(contact.geom1)
-            geom2 = int(contact.geom2)
-            if (
-                geom1 in self.hole_wall_geom_ids
-                and geom2 in self.initial_safety_geom_ids
-            ) or (
-                geom2 in self.hole_wall_geom_ids
-                and geom1 in self.initial_safety_geom_ids
-            ):
-                return True
-        return False
-
-    def _has_initial_hole_column_clearance(self):
-        hole_mouth = np.array(self.sim.data.site_xpos[self.hole_mouth_site_id])
-        hole_axis = np.array(self.sim.data.site_xmat[self.hole_axis_site_id]).reshape(3, 3)[:, 2]
+    def _has_initial_peg_clearance_from_fk(self):
+        """Check peg-bottom clearance using forward-kinematic body/site poses."""
+        peg_body_pos = np.array(self.sim.data.body_xpos[self.peg_body_id])
+        peg_body_mat = np.array(self.sim.data.body_xmat[self.peg_body_id]).reshape(3, 3)
+        peg_bottom = peg_body_pos + peg_body_mat @ self.sim.model.site_pos[self.peg_bottom_site_id]
+        hole_body_pos = np.array(self.sim.data.body_xpos[self.hole_body_id])
+        hole_body_mat = np.array(self.sim.data.body_xmat[self.hole_body_id]).reshape(3, 3)
+        hole_mouth = hole_body_pos + hole_body_mat @ self.sim.model.site_pos[self.hole_mouth_site_id]
+        hole_axis = hole_body_mat[:, 2]
         hole_axis = hole_axis / np.linalg.norm(hole_axis)
-        required_clearance = INITIAL_CLEARANCE_ABOVE_HOLE
-        positions = [
-            np.array(self.sim.data.site_xpos[self.peg_bottom_site_id]),
-            np.array(self.sim.data.geom_xpos[self.right_finger_geom_id]),
-            np.array(self.sim.data.geom_xpos[self.left_finger_geom_id]),
-        ]
-        return all(
-            float(np.dot(position - hole_mouth, hole_axis)) >= required_clearance
-            for position in positions
+        return bool(
+            np.dot(peg_bottom - hole_mouth, hole_axis) >= INITIAL_CLEARANCE_ABOVE_HOLE
+        )
+
+    def _has_initial_robot_joint_limit_contact(self, margin=1e-4):
+        robot = self.robots[0]
+        joint_ids = robot._ref_joint_indexes
+        limited = self.sim.model.jnt_limited[joint_ids].astype(bool)
+        if not np.any(limited):
+            return False
+        qpos = self.sim.data.qpos[robot._ref_joint_pos_indexes]
+        ranges = self.sim.model.jnt_range[joint_ids]
+        return bool(
+            np.any(
+                limited
+                & (
+                    (qpos <= ranges[:, 0] + margin)
+                    | (qpos >= ranges[:, 1] - margin)
+                )
+            )
         )
 
     def _reset_internal(self):
@@ -242,18 +258,18 @@ class PegInsertion(ManipulationEnv):
             if attempt > 0:
                 for robot in self.robots:
                     robot.reset(deterministic=self.deterministic_reset, rng=self.rng)
+            if self._has_initial_robot_joint_limit_contact():
+                continue
             self._set_pregrasp_pose()
-            reset_is_safe = (
-                not self._has_initial_hole_column_contact()
-                and self._has_initial_hole_column_clearance()
-            )
+            reset_is_safe = self._has_initial_peg_clearance_from_fk()
             if reset_is_safe:
                 break
         else:
             raise RuntimeError(
-                "Failed to sample a PegInsertion reset with initial peg/fingerpads at least "
-                f"{INITIAL_CLEARANCE_ABOVE_HOLE:.3f}m above the hole column and without "
-                f"hole-wall contact after {MAX_SAFE_RESET_ATTEMPTS} attempts"
+                "Failed to sample a PegInsertion reset away from robot joint limits, with "
+                "initial peg bottom at least "
+                f"{INITIAL_CLEARANCE_ABOVE_HOLE:.3f}m above the hole mouth after "
+                f"{MAX_SAFE_RESET_ATTEMPTS} attempts"
             )
         self._prev_reward_potential = None
 
