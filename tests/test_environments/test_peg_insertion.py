@@ -160,7 +160,6 @@ def test_fixed_hole_position_is_restored():
         env.reset()
         first = env.sim.data.body_xpos[env.hole_body_id].copy()
         assert env.hole_planar_joints == ()
-        assert env.hole_yaw_joint is None
         for _ in range(20):
             env.step(np.zeros(env.action_dim))
         after_steps = env.sim.data.body_xpos[env.hole_body_id].copy()
@@ -188,38 +187,43 @@ def test_random_hole_position_is_seeded_and_in_circle():
         assert np.allclose(sequence1, sequence2)
         assert all(np.linalg.norm(xy - peg_module.FIXED_HOLE_XY) <= radius + 1e-9 for xy in sequence1)
         assert not np.allclose(sequence1[0], sequence1[1])
-        yaw = env1.sim.data.get_joint_qpos(env1.hole_yaw_joint)
+        hole_mat = env1.sim.data.body_xmat[env1.hole_body_id].reshape(3, 3)
+        yaw = np.arctan2(hole_mat[1, 0], hole_mat[0, 0])
         assert -peg_module.HOLE_YAW_RANGE <= yaw <= peg_module.HOLE_YAW_RANGE
+        assert env1.hole_planar_joints == ()
     finally:
         env1.close()
         env2.close()
 
 
-def test_hole_slides_as_one_rigid_structure():
+def test_randomized_hole_stays_static_under_external_force():
     env = _make_env(randomize_hole_position=True)
     try:
         env.reset()
-        initial = env.sim.data.body_xpos[env.hole_body_id].copy()
-        initial_joint_values = [
-            env.sim.data.get_joint_qpos(joint) for joint in env.hole_planar_joints
-        ]
-        env.sim.data.set_joint_qpos(env.hole_slide_joints[0], initial_joint_values[0] + 0.02)
-        env.sim.data.set_joint_qpos(env.hole_slide_joints[1], initial_joint_values[1] - 0.01)
-        env.sim.data.set_joint_qpos(env.hole_yaw_joint, initial_joint_values[2] + 0.2)
-        env.sim.forward()
+        initial_position = env.sim.data.body_xpos[env.hole_body_id].copy()
+        initial_rotation = env.sim.data.body_xmat[env.hole_body_id].copy()
 
-        moved = env.sim.data.body_xpos[env.hole_body_id].copy()
-        assert np.allclose(moved - initial, [0.02, -0.01, 0.0], atol=1e-7)
-        assert np.allclose(
-            env.sim.data.body_xmat[env.hole_body_id].reshape(3, 3),
-            T.euler2mat(np.array([0.0, 0.0, initial_joint_values[2] + 0.2])),
-            atol=1e-7,
-        )
+        for _ in range(200):
+            env.sim.data.xfrc_applied[env.hole_body_id, 0] = 50.0
+            env.sim.step()
+        env.sim.data.xfrc_applied[env.hole_body_id] = 0.0
+
+        assert np.allclose(env.sim.data.body_xpos[env.hole_body_id], initial_position)
+        assert np.allclose(env.sim.data.body_xmat[env.hole_body_id], initial_rotation)
+    finally:
+        env.close()
+
+
+def test_randomized_hole_is_one_rigid_structure():
+    env = _make_env(randomize_hole_position=True)
+    try:
+        env.reset()
         geom_body_ids = {
             env.sim.model.geom_bodyid[env.sim.model.geom_name2id(name)]
             for name in env.hole.contact_geoms
         }
         assert geom_body_ids == {env.hole_body_id}
+        assert env.hole_planar_joints == ()
     finally:
         env.close()
 
@@ -266,8 +270,8 @@ def test_sparse_and_dense_rewards_are_scaled_and_delta_based():
     try:
         sparse.reset()
         dense.reset()
-        _set_peg_pose(sparse, depth=0.04)
-        _set_peg_pose(dense, depth=0.04)
+        _set_peg_pose(sparse, depth=0.041)
+        _set_peg_pose(dense, depth=0.041)
         assert sparse.reward() == pytest.approx(2.0)
         assert dense.reward() == pytest.approx(2.0)
 

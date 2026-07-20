@@ -133,7 +133,10 @@ class PegInsertion(ManipulationEnv):
             quat=AGENTVIEW_QUATERNION,
         )
         self.peg = SquarePegObject(name="peg")
-        self.hole = SquareHoleObject(name="hole", movable=self.randomize_hole_position)
+        # Hole randomization changes the model pose at reset time. The socket must
+        # remain welded to the table during an episode so contact cannot move the
+        # task target.
+        self.hole = SquareHoleObject(name="hole")
         self.hole.set_pos([FIXED_HOLE_XY[0], FIXED_HOLE_XY[1], self.table_offset[2]])
         self.model = ManipulationTask(
             mujoco_arena=arena,
@@ -148,14 +151,8 @@ class PegInsertion(ManipulationEnv):
         self.peg_joint = self.peg.joints[0]
         self.peg_qvel_addr = self.sim.model.get_joint_qvel_addr(self.peg_joint)
         self.hole_planar_joints = tuple(self.hole.joints)
-        expected_hole_joints = 3 if self.randomize_hole_position else 0
-        if len(self.hole_planar_joints) != expected_hole_joints:
-            raise RuntimeError("PegInsertion hole must expose x, y, and yaw planar joints")
-        self.hole_slide_joints = self.hole_planar_joints[:2]
-        self.hole_yaw_joint = self.hole_planar_joints[2] if self.hole_planar_joints else None
-        self.hole_qvel_addrs = tuple(
-            self.sim.model.get_joint_qvel_addr(joint) for joint in self.hole_planar_joints
-        )
+        if self.hole_planar_joints:
+            raise RuntimeError("PegInsertion hole must remain fixed during an episode")
         self.peg_center_site_id = self.sim.model.site_name2id(self.peg.important_sites["center"])
         self.peg_bottom_site_id = self.sim.model.site_name2id(self.peg.important_sites["bottom"])
         self.hole_mouth_site_id = self.sim.model.site_name2id(self.hole.important_sites["mouth"])
@@ -204,19 +201,24 @@ class PegInsertion(ManipulationEnv):
         self.sim.forward()
 
     def _reset_hole_position(self):
-        if not self.hole_planar_joints:
-            return
         if self.randomize_hole_position and self.hole_position_radius > 0.0:
             radius = self.hole_position_radius * np.sqrt(self.rng.uniform())
             angle = self.rng.uniform(-np.pi, np.pi)
             offset = radius * np.array([np.cos(angle), np.sin(angle)])
         else:
             offset = np.zeros(2, dtype=float)
-        yaw = self.rng.uniform(-self.hole_yaw_range, self.hole_yaw_range)
-        for joint, value in zip(self.hole_planar_joints, (*offset, yaw)):
-            self.sim.data.set_joint_qpos(joint, float(value))
-        for addr in self.hole_qvel_addrs:
-            self.sim.data.qvel[addr] = 0.0
+        yaw = (
+            self.rng.uniform(-self.hole_yaw_range, self.hole_yaw_range)
+            if self.randomize_hole_position
+            else 0.0
+        )
+        xy = FIXED_HOLE_XY + offset
+        self.sim.model.body_pos[self.hole_body_id] = np.array(
+            [xy[0], xy[1], self.table_offset[2]], dtype=float
+        )
+        self.sim.model.body_quat[self.hole_body_id] = np.array(
+            [np.cos(yaw / 2.0), 0.0, 0.0, np.sin(yaw / 2.0)], dtype=float
+        )
         self.sim.forward()
 
     def _has_initial_peg_clearance_from_fk(self):
