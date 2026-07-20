@@ -196,6 +196,12 @@ def test_random_hole_position_is_seeded_and_in_circle():
         env2.close()
 
 
+def test_default_randomization_matches_random_hole_training_task():
+    assert peg_module.RANDOMIZE_HOLE_POSITION is True
+    assert peg_module.HOLE_POSITION_RADIUS == pytest.approx(0.05)
+    assert peg_module.HOLE_YAW_RANGE == pytest.approx(np.pi / 4.0)
+
+
 def test_randomized_hole_stays_static_under_external_force():
     env = _make_env(randomize_hole_position=True)
     try:
