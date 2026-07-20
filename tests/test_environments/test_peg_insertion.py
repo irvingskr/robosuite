@@ -187,10 +187,10 @@ def test_random_hole_position_is_seeded_and_in_circle():
         assert np.allclose(sequence1, sequence2)
         assert all(np.linalg.norm(xy - peg_module.FIXED_HOLE_XY) <= radius + 1e-9 for xy in sequence1)
         assert not np.allclose(sequence1[0], sequence1[1])
+        assert env1.hole_planar_joints == ()
         hole_mat = env1.sim.data.body_xmat[env1.hole_body_id].reshape(3, 3)
         yaw = np.arctan2(hole_mat[1, 0], hole_mat[0, 0])
         assert -peg_module.HOLE_YAW_RANGE <= yaw <= peg_module.HOLE_YAW_RANGE
-        assert env1.hole_planar_joints == ()
     finally:
         env1.close()
         env2.close()

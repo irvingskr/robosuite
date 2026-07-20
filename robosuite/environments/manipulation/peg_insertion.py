@@ -11,7 +11,7 @@ from robosuite.utils.observables import Observable, sensor
 
 RANDOMIZE_HOLE_POSITION = True
 FIXED_HOLE_XY = np.array([0.27, 0.00])
-HOLE_POSITION_RADIUS = 0.05
+HOLE_POSITION_RADIUS = 0.03
 HOLE_YAW_RANGE = np.pi / 4.0
 AGENTVIEW_POSITION = np.array([0.6, 0.0, 1.35])
 AGENTVIEW_QUATERNION = np.array([0.653, 0.271, 0.271, 0.653])
@@ -133,10 +133,9 @@ class PegInsertion(ManipulationEnv):
             quat=AGENTVIEW_QUATERNION,
         )
         self.peg = SquarePegObject(name="peg")
-        # Hole randomization changes the model pose at reset time. The socket must
-        # remain welded to the table during an episode so contact cannot move the
-        # task target.
-        self.hole = SquareHoleObject(name="hole")
+        # Randomize the model pose at reset, but keep the socket welded to the
+        # world throughout each episode.
+        self.hole = SquareHoleObject(name="hole", movable=False)
         self.hole.set_pos([FIXED_HOLE_XY[0], FIXED_HOLE_XY[1], self.table_offset[2]])
         self.model = ManipulationTask(
             mujoco_arena=arena,
@@ -152,7 +151,11 @@ class PegInsertion(ManipulationEnv):
         self.peg_qvel_addr = self.sim.model.get_joint_qvel_addr(self.peg_joint)
         self.hole_planar_joints = tuple(self.hole.joints)
         if self.hole_planar_joints:
-            raise RuntimeError("PegInsertion hole must remain fixed during an episode")
+            raise RuntimeError("PegInsertion hole must remain fixed after reset")
+        # Retain these attributes for callers that inspect the environment.
+        self.hole_slide_joints = ()
+        self.hole_yaw_joint = None
+        self.hole_qvel_addrs = ()
         self.peg_center_site_id = self.sim.model.site_name2id(self.peg.important_sites["center"])
         self.peg_bottom_site_id = self.sim.model.site_name2id(self.peg.important_sites["bottom"])
         self.hole_mouth_site_id = self.sim.model.site_name2id(self.hole.important_sites["mouth"])
@@ -209,15 +212,20 @@ class PegInsertion(ManipulationEnv):
             offset = np.zeros(2, dtype=float)
         yaw = (
             self.rng.uniform(-self.hole_yaw_range, self.hole_yaw_range)
-            if self.randomize_hole_position
+            if self.randomize_hole_position and self.hole_yaw_range > 0.0
             else 0.0
         )
-        xy = FIXED_HOLE_XY + offset
         self.sim.model.body_pos[self.hole_body_id] = np.array(
-            [xy[0], xy[1], self.table_offset[2]], dtype=float
+            [
+                FIXED_HOLE_XY[0] + offset[0],
+                FIXED_HOLE_XY[1] + offset[1],
+                self.table_offset[2],
+            ],
+            dtype=float,
         )
         self.sim.model.body_quat[self.hole_body_id] = np.array(
-            [np.cos(yaw / 2.0), 0.0, 0.0, np.sin(yaw / 2.0)], dtype=float
+            [np.cos(yaw / 2.0), 0.0, 0.0, np.sin(yaw / 2.0)],
+            dtype=float,
         )
         self.sim.forward()
 
