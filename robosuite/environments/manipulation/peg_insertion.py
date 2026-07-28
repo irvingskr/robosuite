@@ -11,7 +11,7 @@ from robosuite.utils.observables import Observable, sensor
 
 RANDOMIZE_HOLE_POSITION = True
 FIXED_HOLE_XY = np.array([0.27, 0.00])
-HOLE_POSITION_RADIUS = 0.05
+HOLE_POSITION_RADIUS = 0.03
 HOLE_YAW_RANGE = np.pi / 4.0
 AGENTVIEW_POSITION = np.array([0.6, 0.0, 1.35])
 AGENTVIEW_QUATERNION = np.array([0.653, 0.271, 0.271, 0.653])
